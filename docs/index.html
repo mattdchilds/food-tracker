@@ -89,6 +89,9 @@ select:disabled{opacity:.6;cursor:not-allowed}
 .card{background:var(--surface);border:2px solid var(--border);border-radius:var(--r);cursor:pointer;text-align:left;transition:transform .12s,border-color .12s,box-shadow .12s,opacity .2s,filter .2s;position:relative;overflow:hidden;box-shadow:var(--sh);display:flex;flex-direction:column;min-height:88px;user-select:none}
 .card:hover:not(.grey){border-color:var(--primary);box-shadow:var(--sh2);transform:translateY(-2px)}
 .card.grey{opacity:.32;filter:grayscale(.7);cursor:pointer}
+.card.grey.dof1{opacity:.5;filter:grayscale(.35);border-color:rgba(239,68,68,.35)}
+.card.grey.dof2{opacity:.56;filter:grayscale(.22);border-color:rgba(239,68,68,.62)}
+.card.grey.dof3{opacity:.62;filter:grayscale(.1);border-color:var(--bad)}
 .card.eaten{border-color:var(--primary);background:var(--primary-lt)}
 .card.grey.eaten{opacity:.65;filter:grayscale(.35);border-color:var(--primary);background:var(--primary-lt)}
 .card.xed{opacity:.35;filter:grayscale(.8);cursor:not-allowed;border-style:dashed;border-color:var(--bad)}
@@ -112,6 +115,8 @@ select:disabled{opacity:.6;cursor:not-allowed}
 .rbar-fill{height:100%;transition:width .3s,background .3s}
 .tracking-mode-banner{display:none;align-items:center;gap:8px;padding:8px 20px;font-size:12px;font-weight:600;border-bottom:2px solid var(--primary);background:var(--primary-lt);color:var(--primary);flex-wrap:wrap}
 .tracking-mode-banner.show{display:flex}
+.relax-banner{display:none;align-items:center;gap:8px;padding:8px 20px;font-size:12px;font-weight:600;border-bottom:2px solid var(--warn);background:var(--warn-lt);color:var(--warn);flex-wrap:wrap}
+.relax-banner.show{display:flex}
 #eaten-sec{max-width:1400px;margin:0 auto;padding:0 16px 28px}
 #eaten-sec h2{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:8px}
 .eaten-list{display:flex;flex-wrap:wrap;gap:6px}
@@ -200,6 +205,7 @@ select:disabled{opacity:.6;cursor:not-allowed}
 
 <div id="lib-banner" class="hidden"></div>
 <div id="tracking-banner" class="tracking-mode-banner"></div>
+<div id="relax-banner" class="relax-banner"></div>
 <div id="recompute-banner" class="hidden"></div>
 
 <div id="sort-row">
@@ -301,6 +307,7 @@ let S = {
   incFeas:  null,
   excluded: {},
   trackingMode: false,
+  tempGoals: {},        // goalId→relaxed goal/threshold for today (degrees-of-failure)
 };
 
 let _computing    = false;
@@ -951,7 +958,7 @@ function allGoalsMet(sums, avgs){
 //  PRECOMPUTATION
 // ═══════════════════════════════════════════════
 function precompHash(){
-  const goalSig = S.goals.map(g=>
+  const goalSig = effGoals().map(g=>
     `${g.id}:${g.type}:${g.threshold??g.goal}:${g.range??''}:${g.default??0}:${g.targetCategory??''}`
   ).join('|');
   const nonCalGoals = S.goals.filter(g=>g.type!=='count_min'&&g.id!=='cal');
@@ -1001,7 +1008,7 @@ function startPrecompute(){
     ev  => { _worker=null; _computing=false; storePrecomp(ev.data); },
     err => { console.error('Worker error:',err); _worker=null; _computing=false; render(); }
   );
-  _worker.postMessage({foods:allFoods().map(f=>({...f,_cat:getFoodCategory(f)})), goals:S.goals, exCals:S.exCals});
+  _worker.postMessage({foods:allFoods().map(f=>({...f,_cat:getFoodCategory(f)})), goals:effGoals(), exCals:S.exCals});
 }
 
 function storePrecomp(data){
@@ -1038,7 +1045,7 @@ function startIncFeasCompute(){
   );
   _incWorker.postMessage({
     foods: allFoods().map(f=>({...f,_cat:getFoodCategory(f)})),
-    goals: S.goals,
+    goals: effGoals(),
     exCals: S.exCals,
     currentServings: S.servings,
     excludedIds: Object.keys(S.excluded)
@@ -1083,7 +1090,8 @@ function computeFeasibility(){
 
 function computeFeasibilityDP(foods, feasMap){
   feasMap = feasMap||{};
-  const calGoal = S.goals.find(g=>g.id==='cal');
+  const goals = effGoals();
+  const calGoal = goals.find(g=>g.id==='cal');
   if(!calGoal) return feasMap;
   const calMinRaw = calGoal.goal - calGoal.range + S.exCals;
   const calMaxRaw = calGoal.goal + calGoal.range + S.exCals;
@@ -1091,11 +1099,11 @@ function computeFeasibilityDP(foods, feasMap){
   // Accumulate current state from eaten foods
   let rawCalNow=0;
   const sumsNow={}, hwNow={};
-  for(const g of S.goals){ sumsNow[g.id]=0; hwNow[g.id]=0; }
+  for(const g of goals){ sumsNow[g.id]=0; hwNow[g.id]=0; }
   for(const f of foods){
     const s=servingsOf(f.id); if(!s) continue;
     rawCalNow+=f.cal*s;
-    for(const g of S.goals){
+    for(const g of goals){
       if(g.id==='cal') continue;
       if(g.type==='count_min'){ sumsNow[g.id]+=foodCountsForGoal(f,g)*s; continue; }
       const m=getMetric(f,g);
@@ -1108,11 +1116,11 @@ function computeFeasibilityDP(foods, feasMap){
   // min/avg goals use calorie-aware inline computation to avoid false positives near the calorie ceiling.
   let totRemCal=0;
   const totRemCount={};
-  for(const g of S.goals) if(g.type==='count_min') totRemCount[g.id]=0;
+  for(const g of goals) if(g.type==='count_min') totRemCount[g.id]=0;
   for(const f of foods){
     const avail=maxServingsOf(f.id)-servingsOf(f.id); if(avail<=0) continue;
     totRemCal+=f.cal*avail;
-    for(const g of S.goals){
+    for(const g of goals){
       if(g.type==='count_min') totRemCount[g.id]=(totRemCount[g.id]||0)+(foodCountsForGoal(f,g)*avail);
     }
   }
@@ -1134,7 +1142,7 @@ function computeFeasibilityDP(foods, feasMap){
       const remCalHeadroom=calMaxRaw-newRawCal;
 
       let goalOk=true;
-      for(const g of S.goals){
+      for(const g of goals){
         if(!goalOk) break;
         if(g.id==='cal') continue;
 
@@ -1209,6 +1217,145 @@ function computeFeasibilityDP(foods, feasMap){
   return feasMap;
 }
 
+// ═══════════════════════════════════════════════
+//  DEGREES OF FAILURE (goal relaxation estimate)
+// ═══════════════════════════════════════════════
+// Estimates the smallest per-goal relaxation that would let ONE serving of f
+// into a plan, using the same optimistic bounds as computeFeasibilityDP.
+// Returns {changes:{goalId:newValue}, deg} — `changes` is empty when only joint
+// constraints bind (each goal passes its own bound but no combination works);
+// `deg` = worst relative violation across goals, used to tint the card red.
+// Optimistic bounds mean the estimate can under-relax; the exact worker re-runs
+// afterward and the existing "no valid plan" banner catches the rare miss.
+function relaxNeededFor(f){
+  const goals=effGoals();
+  const foods=allFoods().filter(x=>!isExcluded(x.id));
+  const calGoal=goals.find(g=>g.id==='cal');
+  if(!calGoal) return {changes:{},deg:0};
+  const calMinRaw=calGoal.goal-calGoal.range+S.exCals;
+  const calMaxRaw=calGoal.goal+calGoal.range+S.exCals;
+
+  let rawCalNow=0;
+  const sumsNow={}, hwNow={};
+  for(const g of goals){ sumsNow[g.id]=0; hwNow[g.id]=0; }
+  for(const x of foods){
+    const s=servingsOf(x.id); if(!s) continue;
+    rawCalNow+=x.cal*s;
+    for(const g of goals){
+      if(g.id==='cal') continue;
+      if(g.type==='count_min'){ sumsNow[g.id]+=foodCountsForGoal(x,g)*s; continue; }
+      const m=getMetric(x,g);
+      sumsNow[g.id]+=m*s;
+      if(g.type==='avg_min'||g.type==='avg_max') hwNow[g.id]+=m*x.cal*s;
+    }
+  }
+  let totRemCal=0;
+  const totRemCount={};
+  for(const g of goals) if(g.type==='count_min') totRemCount[g.id]=0;
+  for(const x of foods){
+    const availX=maxServingsOf(x.id)-servingsOf(x.id); if(availX<=0) continue;
+    totRemCal+=x.cal*availX;
+    for(const g of goals){
+      if(g.type==='count_min') totRemCount[g.id]=(totRemCount[g.id]||0)+(foodCountsForGoal(x,g)*availX);
+    }
+  }
+
+  const avail=maxServingsOf(f.id)-servingsOf(f.id);
+  const sx=1;
+  const newRawCal=rawCalNow+f.cal*sx;
+  const remCal=totRemCal-f.cal*avail+f.cal*(avail-sx);
+  // Headroom under the (possibly already blown) calorie ceiling — floor at 0 so
+  // afford counts below stay sane when f itself overshoots calories.
+  const remCalHeadroom=Math.max(0,calMaxRaw-newRawCal);
+
+  const changes={};
+  let deg=0;
+  const bump=(gid,val,rel)=>{ changes[gid]=val; if(rel>deg) deg=rel; };
+
+  if(newRawCal>calMaxRaw){
+    const delta=newRawCal-calMaxRaw;
+    bump('cal', Math.ceil(calGoal.goal+delta), delta/Math.max(1,calGoal.goal));
+  } else if(newRawCal+remCal<calMinRaw){
+    const delta=calMinRaw-(newRawCal+remCal);
+    bump('cal', Math.floor(calGoal.goal-delta), delta/Math.max(1,calGoal.goal));
+  }
+
+  for(const g of goals){
+    if(g.id==='cal') continue;
+
+    if(g.type==='count_min'){
+      const fc=foodCountsForGoal(f,g);
+      const newM=sumsNow[g.id]+fc*sx;
+      const remM=(totRemCount[g.id]||0)-fc*avail+fc*(avail-sx);
+      const attain=newM+remM;
+      if(attain<g.threshold) bump(g.id, Math.max(0,Math.floor(attain)), (g.threshold-attain)/Math.max(1,g.threshold));
+
+    } else if(g.type==='min'){
+      const m=getMetric(f,g);
+      const newSum=sumsNow[g.id]+m*sx;
+      const fOwnAfford=f.cal>0?Math.min(avail-sx,Math.floor(remCalHeadroom/f.cal)):avail-sx;
+      let calAwareRem=m*fOwnAfford;
+      for(const j of foods){
+        if(j.id===f.id) continue;
+        const availJ=maxServingsOf(j.id)-servingsOf(j.id); if(availJ<=0) continue;
+        const afford=j.cal>0?Math.min(availJ,Math.floor(remCalHeadroom/j.cal)):availJ;
+        calAwareRem+=getMetric(j,g)*afford;
+      }
+      const attain=newSum+calAwareRem;
+      if(attain<g.threshold) bump(g.id, Math.max(0,Math.floor(attain)), (g.threshold-attain)/Math.max(1,g.threshold));
+
+    } else if(g.type==='max'){
+      const m=getMetric(f,g);
+      const newSum=sumsNow[g.id]+m*sx;
+      if(newSum>g.threshold) bump(g.id, Math.ceil(newSum), (newSum-g.threshold)/Math.max(1,g.threshold));
+
+    } else if(g.type==='avg_min'&&newRawCal>0){
+      const m=getMetric(f,g);
+      const newHW=hwNow[g.id]+m*f.cal*sx;
+      const fOwnAfford=f.cal>0?Math.min(avail-sx,Math.floor(remCalHeadroom/f.cal)):avail-sx;
+      let calAwareRemHS=Math.max(0,(m-g.threshold)*f.cal*fOwnAfford);
+      for(const j of foods){
+        if(j.id===f.id) continue;
+        const availJ=maxServingsOf(j.id)-servingsOf(j.id); if(availJ<=0) continue;
+        const surJ=(getMetric(j,g)-g.threshold)*j.cal;
+        if(surJ>0){
+          const afford=j.cal>0?Math.min(availJ,Math.floor(remCalHeadroom/j.cal)):availJ;
+          calAwareRemHS+=surJ*afford;
+        }
+      }
+      if(newHW-g.threshold*newRawCal+calAwareRemHS<-1e-6){
+        const thr2=Math.max(0,Math.floor((newHW+calAwareRemHS)/newRawCal*100)/100);
+        bump(g.id, thr2, (g.threshold-thr2)/Math.max(.01,g.threshold));
+      }
+
+    } else if(g.type==='avg_max'&&newRawCal>0){
+      const m=getMetric(f,g);
+      const newHW=hwNow[g.id]+m*f.cal*sx;
+      const fOwnAfford=f.cal>0?Math.min(avail-sx,Math.floor(remCalHeadroom/f.cal)):avail-sx;
+      let calAwareRemHD=Math.max(0,(g.threshold-m)*f.cal*fOwnAfford);
+      for(const j of foods){
+        if(j.id===f.id) continue;
+        const availJ=maxServingsOf(j.id)-servingsOf(j.id); if(availJ<=0) continue;
+        const recJ=(g.threshold-getMetric(j,g))*j.cal;
+        if(recJ>0){
+          const afford=j.cal>0?Math.min(availJ,Math.floor(remCalHeadroom/j.cal)):availJ;
+          calAwareRemHD+=recJ*afford;
+        }
+      }
+      if(g.threshold*newRawCal-newHW+calAwareRemHD<-1e-6){
+        const thr2=Math.ceil((newHW-calAwareRemHD)/newRawCal*100)/100;
+        bump(g.id, thr2, (thr2-g.threshold)/Math.max(.01,g.threshold));
+      }
+    }
+  }
+
+  // Exact solver says infeasible but every per-goal bound passes: goals conflict
+  // jointly. Treat as barely-failing for display; no single number to bump.
+  if(!Object.keys(changes).length) deg=.03;
+  return {changes, deg};
+}
+function dofTier(deg){ return deg<=.06?1:deg<=.18?2:3; }
+
 function getDispGoals(){
   return S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min').slice(0,2);
 }
@@ -1249,6 +1396,7 @@ function render(){
   const st = computeStats();
   const feas = computeFeasibility();
   renderTrackingBanner();
+  renderRelaxBanner();
   renderBanner(st);
   renderStats(st);
   renderGrids(feas);
@@ -1262,6 +1410,24 @@ function renderTrackingBanner(){
   el.innerHTML='📊 Tracking mode — meal planning paused. Foods are added freely. &nbsp;<button class="btn btn-sm" id="btn-exit-tracking">↺ Back to Planning</button>';
   document.getElementById('btn-exit-tracking').addEventListener('click',()=>{
     S.trackingMode=false;
+    saveState(); render();
+  });
+}
+
+function renderRelaxBanner(){
+  const el=document.getElementById('relax-banner');
+  const ids=Object.keys(S.tempGoals||{});
+  if(!ids.length){el.className='relax-banner';return;}
+  const parts=ids.map(gid=>{
+    const g=S.goals.find(x=>x.id===gid); if(!g) return '';
+    const orig=g.type==='range'?g.goal:g.threshold;
+    return `${esc(g.name)} ${fmtVal(S.tempGoals[gid],g)} (was ${fmtVal(orig,g)})`;
+  }).filter(Boolean).join(' · ');
+  el.className='relax-banner show';
+  el.innerHTML=`🔓 Goals relaxed today: ${parts} &nbsp;<button class="btn btn-sm" id="btn-restore-goals">↺ Restore goals</button>`;
+  document.getElementById('btn-restore-goals').addEventListener('click',()=>{
+    S.tempGoals={};
+    startIncFeasCompute();
     saveState(); render();
   });
 }
@@ -1303,6 +1469,20 @@ function fmtVal(v, g){
 
 function effThr(g){ return (S.tempGoals&&S.tempGoals[g.id]!==undefined) ? S.tempGoals[g.id] : g.threshold; }
 function effGoalCal(g){ return (S.tempGoals&&S.tempGoals[g.id]!==undefined) ? S.tempGoals[g.id] : g.goal; }
+// Goals with today's temp relaxations baked in — feed these to the solver so
+// feasibility honors relaxed values (raw S.goals stay untouched in settings).
+function effGoals(){
+  return S.goals.map(g=>{
+    const tv=S.tempGoals?S.tempGoals[g.id]:undefined;
+    if(tv===undefined) return g;
+    return g.type==='range' ? {...g,goal:tv} : {...g,threshold:tv};
+  });
+}
+
+function goalLabel(g){
+  return (S.tempGoals&&S.tempGoals[g.id]!==undefined)
+    ? `<span style="color:var(--warn)" title="Relaxed today">🔓 ${g.name}</span>` : g.name;
+}
 
 function renderStats(st){
   const {sums, avgs} = st;
@@ -1325,14 +1505,14 @@ function renderStats(st){
       const color=inWin?'g':rawCal>effMax?'b':rawCal>=effMin*.9?'w':'b';
       const exNote=S.exCals>0?` <small style="color:var(--ok)">+${S.exCals} burn</small>`:'';
       html+=`<div class="stat">
-        <div class="stat-lbl"><span>${g.name}${exNote}</span><span>${rawCal} / ${effGoal} <small style="color:var(--muted)">(${effMin}–${effMax})</small></span></div>
+        <div class="stat-lbl"><span>${goalLabel(g)}${exNote}</span><span>${rawCal} / ${effGoal} <small style="color:var(--muted)">(${effMin}–${effMax})</small></span></div>
         <div class="pbar"><div class="pbar-fill ${color}" style="width:${pctFill}"></div></div>
       </div>`;
     } else if(g.type==='count_min'){
       const thr=effThr(g);
       const val=sums[g.id]||0; const ok=val>=thr;
       html+=`<div class="stat" style="justify-content:flex-end">
-        <div class="stat-lbl"><span>${g.name}${planNote}</span></div>
+        <div class="stat-lbl"><span>${goalLabel(g)}${planNote}</span></div>
         <div class="meals-badge ${ok?'':'unmet'}">${ok?'✓':'✗'} ${val} / ${thr} ${g.name.toLowerCase()}</div>
       </div>`;
     } else {
@@ -1344,7 +1524,7 @@ function renderStats(st){
       const color=progressColor(val,thr,g.type==='max'||g.type==='avg_max');
       const dirLabel=(g.type==='max'||g.type==='avg_max')?'≤':'≥';
       html+=`<div class="stat">
-        <div class="stat-lbl"><span>${g.name}</span><span>${fmtVal(val,g)}${unit} / ${dirLabel}${thr}${unit}</span></div>
+        <div class="stat-lbl"><span>${goalLabel(g)}</span><span>${fmtVal(val,g)}${unit} / ${dirLabel}${thr}${unit}</span></div>
         <div class="pbar"><div class="pbar-fill ${color}" style="width:${pctFill}"></div></div>
       </div>`;
     }
@@ -1353,7 +1533,7 @@ function renderStats(st){
   document.getElementById('goals-badge').classList.toggle('show', allGoalsMet(sums,avgs));
 }
 
-function makeCard(f, feas, ppcRange){
+function makeCard(f, feas, ppcRange, relaxCache){
   const s=servingsOf(f.id);
   const isFeas=feas[f.id]!==false;
   const ms=maxServingsOf(f.id);
@@ -1361,12 +1541,15 @@ function makeCard(f, feas, ppcRange){
   // In tracking mode: all non-excluded foods are treated as clickable (no greying)
   const showGrey=!S.trackingMode&&!isFeas;
   const canInteract=S.trackingMode?!xed:(isFeas&&!xed);
-  // Infeasible in plan mode: clickable to enter tracking mode
+  // Infeasible in plan mode: clickable to relax goals (degrees of failure)
   const canForceAdd=!S.trackingMode&&!isFeas&&!xed;
+  let dof=null;
+  if(canForceAdd&&relaxCache) dof=relaxCache[f.id]||(relaxCache[f.id]=relaxNeededFor(f));
 
   const div=document.createElement('div');
   let cls='card';
   if(showGrey) cls+=' grey';
+  if(dof) cls+=' dof'+dofTier(dof.deg);
   if(eaten) cls+=' eaten';
   if(xed) cls+=' xed';
   div.className=cls;
@@ -1398,11 +1581,10 @@ function makeCard(f, feas, ppcRange){
       addServing(f.id);
     });
   } else if(canForceAdd){
-    // Clicking an infeasible food in plan mode → enter tracking mode and add it
+    // Clicking an infeasible food in plan mode → offer to relax goals (or track freely)
     div.addEventListener('click',ev=>{
       if(ev.target.closest('[data-edit],[data-excl]')) return;
-      enterTrackingMode();
-      addServing(f.id);
+      openRelaxDialog(f, dof||relaxNeededFor(f));
     });
   }
   div.addEventListener('contextmenu',ev=>{
@@ -1426,6 +1608,7 @@ function makeCard(f, feas, ppcRange){
 function renderGrids(feas){
   const foods=allFoods();
   const ppcRange=computePPCRange(foods);
+  const relaxCache={}; // per-render memo of relaxNeededFor results
   const container=document.getElementById('main');
   container.innerHTML='';
   const sorted=sortFoods(foods);
@@ -1455,7 +1638,7 @@ function renderGrids(feas){
     grid.className='food-grid';
     grid.id='grid-'+cat.id;
     if(cat.collapsed) grid.style.display='none';
-    for(const f of catFoods) grid.appendChild(makeCard(f,feas,ppcRange));
+    for(const f of catFoods) grid.appendChild(makeCard(f,feas,ppcRange,relaxCache));
     sec.appendChild(grid);
     container.appendChild(sec);
   }
@@ -1469,7 +1652,7 @@ function renderGrids(feas){
     sec.appendChild(hdrDiv);
     const grid=document.createElement('div');
     grid.className='food-grid';
-    for(const f of orphans) grid.appendChild(makeCard(f,feas,ppcRange));
+    for(const f of orphans) grid.appendChild(makeCard(f,feas,ppcRange,relaxCache));
     sec.appendChild(grid);
     container.appendChild(sec);
   }
@@ -1505,6 +1688,52 @@ function renderEaten(){
 function enterTrackingMode(){
   S.trackingMode=true;
   saveState();
+}
+
+// ── Degrees-of-failure dialog ─────────────────
+function describeRelaxChange(g, nv){
+  const unit=g.unit?` ${g.unit}`:'';
+  if(g.type==='range'){
+    const oldG=effGoalCal(g), delta=nv-oldG;
+    return `${esc(g.name)}: ${oldG} ± ${g.range} → <b>${nv} ± ${g.range}</b>${unit} (${delta>0?'+':''}${delta})`;
+  }
+  const dir=(g.type==='max'||g.type==='avg_max')?'≤':'≥';
+  return `${esc(g.name)}: ${dir}${fmtVal(effThr(g),g)} → <b>${dir}${fmtVal(nv,g)}</b>${unit}`;
+}
+
+function openRelaxDialog(f, info){
+  const entries=Object.entries(info.changes)
+    .map(([gid,nv])=>[S.goals.find(g=>g.id===gid),nv])
+    .filter(([g])=>g);
+  const rows=entries.map(([g,nv])=>`<li>${describeRelaxChange(g,nv)}</li>`).join('');
+  const body=entries.length
+    ? `<p style="margin-bottom:8px"><b>${esc(f.name)}</b> doesn't fit today's plan. Relax these goals for today only?</p>
+       <ul style="margin:0 0 14px 18px;font-size:13px;line-height:1.8">${rows}</ul>`
+    : `<p style="margin-bottom:14px"><b>${esc(f.name)}</b> doesn't fit today's plan — the goals conflict in combination rather than one number being off. You can still add it by switching to free tracking.</p>`;
+  openModal(`<h2>🔓 Doesn't fit the plan</h2>${body}
+    <div class="mactions">
+      ${entries.length?`<button type="button" class="btn pri" id="btn-relax-add">Relax goals & add</button>`:''}
+      <button type="button" class="btn" id="btn-track-add">Track freely</button>
+      <button type="button" class="btn btn-cancel">Cancel</button>
+    </div>`);
+  document.getElementById('btn-relax-add')?.addEventListener('click',()=>{
+    closeModal();
+    S.tempGoals=Object.assign({},S.tempGoals,info.changes);
+    forceAddServing(f.id);
+  });
+  document.getElementById('btn-track-add').addEventListener('click',()=>{
+    closeModal();
+    enterTrackingMode();
+    forceAddServing(f.id);
+  });
+}
+
+// Bypasses addServing's _incComputing guard: the user explicitly confirmed this
+// add via the relax dialog, and goals/state just changed anyway.
+function forceAddServing(id){
+  S.servings[id]=(servingsOf(id)||0)+1;
+  startIncFeasCompute();
+  saveState(); render();
 }
 
 function addServing(id){
