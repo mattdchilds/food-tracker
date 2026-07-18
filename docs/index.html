@@ -612,7 +612,19 @@ function showLibBanner(mode, handle){
 }
 
 async function initLibFile(){
-  if(!HAS_FSA) return;
+  if(!HAS_FSA){
+    // No File System Access API (mobile browsers): offer a one-time import when the library looks empty
+    if(!LS.get(lk('lib_dismissed'),false) && !S.custom.length && !Object.keys(S.overrides).length){
+      const el=document.getElementById('lib-banner');
+      el.className='lib-banner';
+      el.innerHTML='📂 Have a food-library.json backup? Import it to bring your foods over. &nbsp;'+
+        '<button class="btn btn-sm pri" id="lbtn-imp-b">Import JSON</button> '+
+        '<button class="btn btn-sm" style="margin-left:auto" id="lbtn-dismiss-b">Dismiss</button>';
+      document.getElementById('lbtn-imp-b').addEventListener('click',()=>{el.className='hidden';importLibraryJSON();});
+      document.getElementById('lbtn-dismiss-b').addEventListener('click',()=>{LS.set(lk('lib_dismissed'),true);el.className='hidden';});
+    }
+    return;
+  }
   try{
     const handle=await IDB.get('libFileHandle');
     if(handle){
