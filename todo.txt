@@ -1,0 +1,5 @@
+-Make mobile - into progressive web app. Compress and rearrange where needed.
+-Allow for 1/2 servings, not used by solver
+-Allow degrees of failure. Each data type has a value - for example, calories has +100, protein has -10, health score has -0.05. Instead of greying out food that would push over a limit, mark them red. If clicked, it pushes one or multiple of those scores thresholds up, which is visible to the user. A "number of thresholds" value is visible. For example, I really want to eat a donut but it would make my day unsolvable due to health - But it just now pushes it from threshold 1->2, and the health score is -.05 more leniant. If then I want to eat oatmeal which would not be available due to not enough protein, its red, and clicking on it goes threshold 2->3, and protein requirement is laxed one .
+-Make temporary foods last until the next day - right now they dissapear on refresh.
+-Add LLM support - It should be able to see current foods, add a food or a temporary food and fill in its values.

@@ -1,0 +1,1175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Meal Planner</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --primary:#3b82f6;--primary-lt:#1e3a5f;
+  --ok:#22c55e;--ok-lt:#14532d;
+  --warn:#f59e0b;--warn-lt:#451a03;
+  --bad:#ef4444;--bad-lt:#450a0a;
+  --bg:#0f172a;--surface:#1e293b;--border:#334155;
+  --text:#f1f5f9;--muted:#94a3b8;
+  --r:10px;--sh:0 1px 3px rgba(0,0,0,.4);--sh2:0 4px 12px rgba(0,0,0,.5)
+}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);font-size:14px;min-height:100vh}
+
+/* ── HEADER ─────────────────────────────────────────────── */
+#hdr{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 20px;position:sticky;top:0;z-index:100;box-shadow:var(--sh)}
+.hdr-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:8px;flex-wrap:wrap}
+.hdr-top h1{font-size:1.1rem;font-weight:800;white-space:nowrap}
+.hdr-actions{display:flex;gap:6px;flex-wrap:wrap}
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px 16px}
+.stat{display:flex;flex-direction:column;gap:3px}
+.stat-lbl{display:flex;justify-content:space-between;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.stat-val{font-size:13px;font-weight:700}
+.pbar{height:6px;background:var(--border);border-radius:3px;overflow:hidden;position:relative}
+.pbar-fill{height:100%;border-radius:3px;transition:width .3s,background .3s;max-width:100%}
+.g{background:var(--ok)}.w{background:var(--warn)}.b{background:var(--bad)}
+.meals-badge{display:inline-flex;align-items:center;gap:4px;background:var(--ok-lt);color:var(--ok);border-radius:20px;padding:2px 10px;font-size:12px;font-weight:700}
+.meals-badge.unmet{background:var(--bad-lt);color:var(--bad)}
+.ex-row{display:flex;align-items:center;gap:8px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);flex-wrap:wrap}
+.ex-row label{font-size:12px;font-weight:700;white-space:nowrap}
+.goals-badge{display:none;align-items:center;gap:4px;background:var(--ok-lt);color:var(--ok);border-radius:20px;padding:3px 12px;font-size:12px;font-weight:700;margin-left:auto}
+.goals-badge.show{display:inline-flex}
+
+/* ── RECOMPUTE BANNER ───────────────────────────────────── */
+#recompute-banner{display:flex;align-items:center;gap:8px;padding:8px 20px;font-size:12px;font-weight:600;border-bottom:2px solid var(--warn);background:var(--warn-lt);color:var(--warn);position:sticky;top:0;z-index:99}
+#recompute-banner.computing{border-color:var(--primary);background:var(--primary-lt);color:var(--primary)}
+#recompute-banner.hidden{display:none}
+
+/* ── BUTTONS / INPUTS ───────────────────────────────────── */
+.btn{padding:5px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;transition:background .15s,border-color .15s;white-space:nowrap}
+.btn:hover{background:var(--bg)}
+.btn.pri{background:var(--primary);color:#fff;border-color:var(--primary)}.btn.pri:hover{background:#1d4ed8}
+.btn.ok{background:var(--ok);color:#fff;border-color:var(--ok)}.btn.ok:hover{background:#15803d}
+.btn.dng{background:var(--bad);color:#fff;border-color:var(--bad)}.btn.dng:hover{background:#b91c1c}
+input[type=number],input[type=text]{border:1px solid var(--border);border-radius:8px;padding:5px 9px;font-size:13px;color:var(--text);background:var(--surface);width:80px}
+input:focus{outline:2px solid var(--primary);outline-offset:-1px}
+.ex-row input[type=number]{width:90px}
+
+/* ── MAIN LAYOUT ────────────────────────────────────────── */
+#main{max-width:1400px;margin:0 auto;padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:700px){#main{grid-template-columns:1fr}}
+.sec-hdr{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:10px}
+.food-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:8px}
+
+/* ── FOOD CARDS ─────────────────────────────────────────── */
+.card{background:var(--surface);border:2px solid var(--border);border-radius:var(--r);cursor:pointer;text-align:left;transition:transform .12s,border-color .12s,box-shadow .12s,opacity .2s,filter .2s;position:relative;overflow:hidden;box-shadow:var(--sh);display:flex;flex-direction:column;min-height:120px;user-select:none}
+.card:hover:not(.grey):not(.maxed){border-color:var(--primary);box-shadow:var(--sh2);transform:translateY(-2px)}
+.card.grey{opacity:.32;filter:grayscale(.7);cursor:not-allowed}
+.card.maxed{opacity:.55;cursor:not-allowed;border-style:dashed}
+.card.eaten{border-color:var(--primary);background:var(--primary-lt)}
+.card.eaten.maxed{border-color:var(--muted)}
+.card.grey.eaten{opacity:.65;filter:grayscale(.35);border-color:var(--primary);background:var(--primary-lt)}
+.card.xed{opacity:.35;filter:grayscale(.8);cursor:not-allowed;border-style:dashed;border-color:var(--bad)}
+.card.xed.eaten{opacity:.55;filter:grayscale(.4);border-color:var(--bad);background:var(--bad-lt)}
+.card.xed .cname{text-decoration:line-through;text-decoration-color:var(--bad);text-decoration-thickness:2px}
+.hbar{height:4px;width:100%;flex-shrink:0}
+.cbody{padding:9px 9px 6px;flex:1;display:flex;flex-direction:column;gap:3px}
+.cname{font-weight:700;font-size:12px;line-height:1.35}
+.cstats{font-size:11px;color:var(--muted);display:flex;gap:6px;flex-wrap:wrap}
+.cstats b{color:var(--text)}
+.cfoot{display:flex;align-items:center;justify-content:space-between;padding:0 8px 7px;min-height:26px;gap:4px}
+.sbadge{background:var(--primary);color:#fff;border-radius:5px;padding:2px 7px;font-size:11px;font-weight:800}
+.sbadge.two{background:var(--muted)}
+.plus-btn{background:var(--ok);color:#fff;border:none;border-radius:6px;padding:2px 8px;font-size:14px;font-weight:800;cursor:pointer;line-height:1.3;flex-shrink:0}
+.plus-btn:hover{background:#15803d}
+.minus-btn{background:none;border:1px solid var(--border);border-radius:5px;padding:2px 7px;font-size:13px;font-weight:700;cursor:pointer;color:var(--bad);flex-shrink:0;line-height:1.2}
+.minus-btn:hover{background:var(--bad-lt)}
+.edit-btn{background:none;border:1px solid var(--border);border-radius:5px;padding:2px 5px;font-size:10px;cursor:pointer;color:var(--muted);flex-shrink:0}
+.edit-btn:hover{background:var(--bg);color:var(--text)}
+.rbar{height:3px;width:100%;flex-shrink:0;background:var(--border)}
+.rbar-fill{height:100%;transition:width .3s,background .3s}
+
+/* ── EATEN TODAY ────────────────────────────────────────── */
+#eaten-sec{max-width:1400px;margin:0 auto;padding:0 16px 28px}
+#eaten-sec h2{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:8px}
+.eaten-list{display:flex;flex-wrap:wrap;gap:6px}
+.eaten-chip{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:5px 10px;display:flex;align-items:center;gap:7px;font-size:12px;box-shadow:var(--sh)}
+.eaten-chip strong{font-weight:700}
+.eaten-chip span{color:var(--muted)}
+.rm-btn{background:none;border:none;color:var(--bad);cursor:pointer;font-size:14px;padding:0 2px;border-radius:4px;line-height:1}
+.rm-btn:hover{background:var(--bad-lt)}
+.empty{color:var(--muted);font-style:italic;font-size:13px}
+
+/* ── MODAL ──────────────────────────────────────────────── */
+#overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;display:flex;align-items:center;justify-content:center;padding:16px}
+#overlay.h{display:none}
+.mbox{background:var(--surface);border-radius:var(--r);padding:22px;max-width:460px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.mbox h2{font-size:1rem;font-weight:800;margin-bottom:18px}
+.fg{margin-bottom:14px}
+.fg label{display:block;font-weight:700;font-size:12px;margin-bottom:5px}
+.fg input[type=number],.fg input[type=text]{width:100%}
+.fg input[type=range]{width:100%;cursor:pointer}
+.rv{font-weight:800;color:var(--primary)}
+.tog-row{display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;font-weight:600}
+.tog{width:34px;height:18px;background:var(--border);border-radius:9px;position:relative;transition:background .2s;flex-shrink:0}
+.tog.on{background:var(--primary)}
+.tog::after{content:'';position:absolute;width:14px;height:14px;background:#fff;border-radius:50%;top:2px;left:2px;transition:left .2s}
+.tog.on::after{left:18px}
+.mactions{display:flex;gap:8px;justify-content:flex-end;margin-top:20px;flex-wrap:wrap}
+.sep{height:1px;background:var(--border);margin:14px 0}
+.note{font-size:11px;color:var(--muted);margin-top:4px}
+</style>
+</head>
+<body>
+
+<div id="hdr">
+  <div class="hdr-top">
+    <h1>🍽 Meal Planner</h1>
+    <div class="hdr-actions">
+      <button class="btn" id="btn-add">＋ Add Food</button>
+      <button class="btn" id="btn-settings">⚙ Settings</button>
+      <button class="btn" id="btn-reset">↺ Reset Day</button>
+    </div>
+  </div>
+  <div class="stats-row" id="stats-row"></div>
+  <div class="ex-row">
+    <label>⚡ Exercise burned:</label>
+    <input type="number" id="ex-input" min="0" max="5000" step="10" placeholder="0">
+    <span style="font-size:11px;color:var(--muted)">cal</span>
+    <div class="goals-badge" id="goals-badge">✓ All Goals Met!</div>
+  </div>
+</div>
+
+<div id="recompute-banner" class="hidden"></div>
+
+<div id="main">
+  <div><div class="sec-hdr">Meals</div><div class="food-grid" id="meals-grid"></div></div>
+  <div><div class="sec-hdr">Snacks &amp; Other</div><div class="food-grid" id="snacks-grid"></div></div>
+</div>
+
+<div id="eaten-sec">
+  <h2>Eaten Today</h2>
+  <div class="eaten-list" id="eaten-list"></div>
+</div>
+
+<div id="overlay" class="h">
+  <div class="mbox" id="mbox"></div>
+</div>
+
+<script>
+'use strict';
+
+// ═══════════════════════════════════════════════
+//  BASE DATA  (from CSV)
+// ═══════════════════════════════════════════════
+const BASE_FOODS = [
+  {id:'bagel',          name:'Bagel',                          cal:330,  pro:10, meal:true,  h:.35},
+  {id:'burger',         name:'Burger',                         cal:325,  pro:22, meal:true,  h:.45},
+  {id:'chipotle',       name:'Chipotle Chicken Burrito',       cal:1050, pro:61, meal:true,  h:.55},
+  {id:'huel',           name:'Huel',                           cal:505,  pro:42, meal:true,  h:.85},
+  {id:'mac-cheese',     name:'Mac and Cheese',                 cal:669,  pro:33, meal:true,  h:.55},
+  {id:'noodles',        name:'Noodles with Sunflower Seed Sauce',cal:352,pro:14, meal:true,  h:.55},
+  {id:'oatmeal',        name:'Oatmeal',                        cal:159,  pro:6,  meal:true,  h:.75},
+  {id:'pancakes',       name:'Pancakes and Sausage',           cal:360,  pro:31, meal:true,  h:.55},
+  {id:'ramen',          name:'Ramen',                          cal:451,  pro:14, meal:true,  h:.30},
+  {id:'spaghetti',      name:'Spaghetti',                      cal:460,  pro:24, meal:true,  h:.55},
+  {id:'turkey-bec',     name:'Turkey Bacon Egg and Cheese',    cal:690,  pro:30, meal:true,  h:.65},
+  {id:'taco-bell',      name:'Taco Bell Bean Burrito',         cal:360,  pro:13, meal:true,  h:.40},
+  {id:'twice-potato',   name:'Twice Baked Potato',             cal:283,  pro:8,  meal:true,  h:.45},
+  {id:'cereal',         name:'Cereal',                         cal:150,  pro:8,  meal:false, h:.45},
+  {id:'chips',          name:'Chips',                          cal:150,  pro:2,  meal:false, h:.15},
+  {id:'granola',        name:'Honey and Oat Granola',          cal:232,  pro:2,  meal:false, h:.65},
+  {id:'egg',            name:'Hard Boiled Egg',                cal:78,   pro:6,  meal:false, h:.85},
+  {id:'bread',          name:'Homemade Bread',                 cal:223,  pro:4,  meal:false, h:.55},
+  {id:'popcorn',        name:'Popcorn',                        cal:230,  pro:5,  meal:false, h:.55},
+  {id:'protein-bar',    name:'Protein Bar',                    cal:190,  pro:21, meal:false, h:.40},
+  {id:'protein-fluff',  name:'Protein Fluff',                  cal:395,  pro:41, meal:false, h:.70},
+  {id:'chickpeas',      name:'Roasted Chickpeas',              cal:244,  pro:10, meal:false, h:.85},
+  {id:'cheese-salami',  name:'Snack Cheese and Salami',        cal:230,  pro:13, meal:false, h:.35},
+  {id:'apple',          name:'Apple',                          cal:95,   pro:0,  meal:false, h:.95},
+  {id:'feastable',      name:'Feastable',                      cal:180,  pro:3,  meal:false, h:.15},
+  {id:'ice-cream',      name:'Ice Cream Sandwich',             cal:175,  pro:3,  meal:false, h:.10},
+  {id:'fronen',         name:'Fronen',                         cal:350,  pro:3,  meal:false, h:.15},
+];
+
+const DEF_SETTINGS = {calGoal:1900, calRange:50, proMin:80, minMeals:2, minHealth:.6};
+
+// ═══════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════
+let S = {
+  settings: {...DEF_SETTINGS},
+  servings: {},       // id→count (1|2)
+  exCals: 0,          // exercise calories burned
+  overrides: {},      // id→{name,cal,pro,meal,h}  permanent edits to base foods
+  custom: [],         // permanent custom foods  [{id,name,cal,pro,meal,h}]
+  temp: [],           // in-memory temporary foods
+  precomp: null,      // precomputed plan data (see storePrecomp)
+  compatPlans: [],    // indices into precomp.flatPlans valid for current eaten state + exercise
+  excluded: {},       // { foodId: true } — foods X'd out; filtered from allFoods()
+};
+
+// Module-level computation state (not persisted)
+let _computing = false;
+let _worker = null;
+let _exTimer = null;
+
+// ═══════════════════════════════════════════════
+//  PERSISTENCE
+// ═══════════════════════════════════════════════
+const LS = {
+  get(k,d){try{const v=localStorage.getItem(k);return v===null?d:JSON.parse(v)}catch{return d}},
+  set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}},
+};
+
+function todayKey(){return 'day_'+new Date().toISOString().slice(0,10)}
+
+function loadState(){
+  S.settings = {...DEF_SETTINGS, ...LS.get('mp_settings',{})};
+  S.overrides = LS.get('mp_overrides',{});
+  S.custom     = LS.get('mp_custom',[]);
+  const day    = LS.get(todayKey(),{servings:{},exCals:0,excluded:{}});
+  S.excluded   = day.excluded || {};
+  S.servings   = day.servings||{};
+  S.exCals     = day.exCals||0;
+  // temp stays empty on load
+  loadPrecomp();
+}
+
+function saveState(){
+  LS.set('mp_settings', S.settings);
+  LS.set('mp_overrides', S.overrides);
+  LS.set('mp_custom', S.custom);
+  LS.set(todayKey(), {servings:S.servings, exCals:S.exCals, excluded:S.excluded});
+}
+
+// ═══════════════════════════════════════════════
+//  FOOD UTILITIES
+// ═══════════════════════════════════════════════
+function allFoods(){
+  const base = BASE_FOODS.map(f=>({...f,...(S.overrides[f.id]||{}),id:f.id,isBase:true}));
+  const cust = S.custom.map(f=>({...f,isBase:false,isPerm:true}));
+  const tmp  = S.temp.map(f=>({...f,isBase:false,isPerm:false}));
+  return [...base,...cust,...tmp];
+}
+function isExcluded(id){return !!S.excluded[id];}
+
+function getFoodById(id){return allFoods().find(f=>f.id===id)}
+function servingsOf(id){return S.servings[id]||0}
+function healthColor(h){
+  if(h>=.85)return'#16a34a';
+  if(h>=.65)return'#84cc16';
+  if(h>=.50)return'#eab308';
+  if(h>=.35)return'#f97316';
+  return'#dc2626';
+}
+
+// ═══════════════════════════════════════════════
+//  STATS COMPUTATION
+// ═══════════════════════════════════════════════
+function computeStats(){
+  let calNow=0,proNow=0,mealsNow=0,hwNow=0;
+  for(const f of allFoods()){
+    const s=servingsOf(f.id);
+    if(!s) continue;
+    calNow+=f.cal*s; proNow+=f.pro*s;
+    if(f.meal) mealsNow+=s;
+    hwNow+=f.h*f.cal*s;
+  }
+  calNow-=S.exCals; // exercise increases effective budget
+  const totalCal = calNow+S.exCals; // actual eaten (for health calc)
+  const healthScore = totalCal>0 ? hwNow/totalCal : 0;
+  return {calNow,proNow,mealsNow,healthScore,hwNow};
+}
+
+// ═══════════════════════════════════════════════
+//  PRECOMPUTATION — Web Worker branch-and-bound
+//  Enumerates every valid meal plan (satisfying all 4 constraints)
+//  once per food-list + settings combination.
+//  Stored indexed for O(1)-per-plan feasibility queries.
+// ═══════════════════════════════════════════════
+
+// Worker source — self-contained, no access to main-thread globals.
+const WORKER_CODE = `
+'use strict';
+self.onmessage = function(e) {
+  const {foods, settings, exCals = 0} = e.data;
+  const {calGoal, calRange, proMin, minMeals, minHealth} = settings;
+  const calMin = calGoal - calRange + exCals;
+  const calMax = calGoal + calRange + exCals;
+  const CEIL = calMax; // tight window for current exercise level
+  // Sort high-cal foods first: calorie ceiling prune fires earlier and harder
+  foods.sort((a, b) => b.cal - a.cal);
+
+  const n = foods.length;
+
+  // Precompute suffix bounds for aggressive pruning
+  const sufCal   = new Array(n + 1).fill(0);
+  const sufPro   = new Array(n + 1).fill(0);
+  const sufMeals = new Array(n + 1).fill(0);
+  const sufMaxHS = new Array(n + 1).fill(0); // max health surplus achievable from foods[i..n-1]
+  for (let i = n - 1; i >= 0; i--) {
+    sufCal[i]   = sufCal[i + 1]   + foods[i].cal * 2;
+    sufPro[i]   = sufPro[i + 1]   + foods[i].pro * 2;
+    sufMeals[i] = sufMeals[i + 1] + (foods[i].meal ? 2 : 0);
+    const best  = (foods[i].h - minHealth) * foods[i].cal * 2;
+    sufMaxHS[i] = sufMaxHS[i + 1] + (best > 0 ? best : 0);
+  }
+
+  const planList = [];   // Uint8Array[] — temporary during search
+  const calList  = [];   // number[]
+
+  const srv = new Uint8Array(n);
+
+  function search(i, calNow, proNow, mealsNow, hwNow) {
+    if (i === n) {
+      // Leaf: check all four constraints simultaneously
+      if (calNow < calMin || calNow > CEIL) return;
+      if (proNow < proMin) return;
+      if (mealsNow < minMeals) return;
+      if (calNow > 0 && hwNow / calNow < minHealth) return;
+      planList.push(srv.slice());
+      calList.push(calNow);
+      return;
+    }
+    const f = foods[i];
+    const remCal   = sufCal[i + 1];
+    const remPro   = sufPro[i + 1];
+    const remMeals = sufMeals[i + 1];
+    for (let s = 0; s <= 2; s++) {
+      const newCal = calNow + f.cal * s;
+      if (newCal > CEIL) break; // more servings only add more cals
+      // Prune: even with all remaining foods, can't meet calorie floor
+      if (newCal + remCal < calMin) continue;
+      // Prune: can't meet protein even with all remaining
+      if (proNow + f.pro * s + remPro < proMin) continue;
+      // Prune: can't meet meal count even with all remaining
+      const addMeals = f.meal ? s : 0;
+      if (mealsNow + addMeals + remMeals < minMeals) continue;
+      // Prune: health surplus can never recover even with best remaining foods
+      const newHW = hwNow + f.h * f.cal * s;
+      if (newHW - minHealth * newCal + sufMaxHS[i + 1] < -1e-6) continue;
+      srv[i] = s;
+      search(i + 1, newCal, proNow + f.pro * s, mealsNow + addMeals, newHW);
+    }
+    srv[i] = 0;
+  }
+
+  search(0, 0, 0, 0, 0);
+
+  // Pack as flat typed arrays for zero-copy transfer
+  const count = planList.length;
+  const flatPlans = new Uint8Array(count * n);
+  for (let i = 0; i < count; i++) flatPlans.set(planList[i], i * n);
+  const planCals = new Uint16Array(calList);
+
+  self.postMessage(
+    {flatPlans, planCals, foodIds: foods.map(f => f.id), n, count},
+    [flatPlans.buffer, planCals.buffer]
+  );
+};
+`;
+
+// Hash of current settings + food list — used to detect stale precomp.
+function precompHash(){
+  const foods = allFoods();
+  const foodSig = foods.map(f=>`${f.id}:${f.cal}:${f.pro}:${f.meal?1:0}:${f.h}`).join('|');
+  return JSON.stringify(S.settings)+'|'+S.exCals+'|'+foodSig;
+}
+
+function precompIsValid(){
+  return S.precomp && S.precomp.hash === precompHash();
+}
+
+// ── Persistence ───────────────────────────────
+function savePrecomp(){
+  if(!S.precomp) return;
+  const {flatPlans, planCals, foodIds, n, hash, count} = S.precomp;
+  // Encode flatPlans as string of '0'/'1'/'2' chars (JSON-safe, compact)
+  let ps = '';
+  for(let i=0;i<flatPlans.length;i++) ps += String.fromCharCode(flatPlans[i]+48);
+  const toStore = {hash, n, count, ids: foodIds.join(','), ps, cs: Array.from(planCals).join(',')};
+  // Only persist if encoded size is under 3MB
+  try{
+    const encoded = JSON.stringify(toStore);
+    if(encoded.length < 3*1024*1024) LS.set('mp_precomp', toStore);
+  }catch{}
+}
+
+function loadPrecomp(){
+  const raw = LS.get('mp_precomp', null);
+  if(!raw || typeof raw !== 'object') return;
+  try{
+    const {hash, n, count, ids, ps, cs} = raw;
+    if(!hash||!n||!count||!ids||!ps||!cs) return;
+    const foodIds = ids.split(',');
+    const flatPlans = new Uint8Array(count * n);
+    for(let i=0;i<flatPlans.length;i++) flatPlans[i] = ps.charCodeAt(i)-48;
+    const planCals = new Uint16Array(cs.split(',').map(Number));
+    S.precomp = {flatPlans, planCals, foodIds, n, hash, count};
+  }catch(err){
+    S.precomp = null;
+  }
+}
+
+// ── Worker lifecycle ──────────────────────────
+function startPrecompute(){
+  if(_computing) return;
+  _computing = true;
+  render(); // show "Computing..." banner immediately
+  const blob = new Blob([WORKER_CODE], {type:'application/javascript'});
+  const url  = URL.createObjectURL(blob);
+  _worker = new Worker(url);
+  _worker.onmessage = e => {
+    URL.revokeObjectURL(url);
+    _worker = null;
+    _computing = false;
+    storePrecomp(e.data);
+  };
+  _worker.onerror = err => {
+    console.error('Precompute worker error:', err);
+    URL.revokeObjectURL(url);
+    _worker = null;
+    _computing = false;
+    render();
+  };
+  _worker.postMessage({foods: allFoods(), settings: S.settings, exCals: S.exCals});
+}
+
+function storePrecomp(data){
+  const {flatPlans, planCals, foodIds, n, count} = data;
+  S.precomp = {flatPlans, planCals, foodIds, n, hash: precompHash(), count};
+  buildCompatPlans();
+  savePrecomp();
+  saveState();
+  render();
+}
+
+// ── Compatible plan set ───────────────────────
+// S.compatPlans: array of plan indices (into precomp) that are compatible with
+// the current exercise-adjusted calorie window AND current eaten servings.
+// Maintained incrementally: eating a food filters (shrinks), removing rebuilds.
+
+function buildCompatPlans(){
+  if(!S.precomp || !precompIsValid()){ S.compatPlans=[]; return; }
+  const {flatPlans, foodIds, n, count} = S.precomp;
+
+  // Build food-id → plan index map for O(1) lookup
+  const fidx = Object.create(null);
+  foodIds.forEach((id,i)=>{ fidx[id]=i; });
+
+  // Eaten foods with their serving counts
+  const eaten = Object.entries(S.servings).filter(([,s])=>s>0);
+
+  // Excluded foods — plan must use exactly servingsOf(id) of each
+  // (caps the food at its currently-eaten count: 0 eaten → no servings, 1 eaten → no seconds)
+  const exclEntries = [];
+  for(const eid in S.excluded){
+    const xi = fidx[eid];
+    if(xi!==undefined) exclEntries.push([xi, servingsOf(eid)]);
+  }
+
+  // All plans are already enumerated for the current exercise level — no calorie filter needed
+  const compat = [];
+  for(let i=0;i<count;i++){
+    const base = i*n;
+    let ok = true;
+    for(let j=0;j<eaten.length;j++){
+      const [fid, s] = eaten[j];
+      const xi = fidx[fid];
+      if(xi===undefined || flatPlans[base+xi]<s){ ok=false; break; }
+    }
+    if(ok){
+      for(let j=0;j<exclEntries.length;j++){
+        const [xi, cap] = exclEntries[j];
+        if(flatPlans[base+xi]!==cap){ ok=false; break; }
+      }
+    }
+    if(ok) compat.push(i);
+  }
+  S.compatPlans = compat;
+}
+
+// Called after eating or removing a food.
+// added=true → incremental filter (set shrinks); added=false → full rebuild (set may grow).
+function updateCompatPlans(id, newCount, added){
+  if(!S.precomp || !precompIsValid()){ S.compatPlans=[]; return; }
+  if(!added || newCount===0){
+    buildCompatPlans(); // removal or zeroing: set may grow, must rebuild
+    return;
+  }
+  const {flatPlans, foodIds, n} = S.precomp;
+  const xi = foodIds.indexOf(id);
+  if(xi<0){ buildCompatPlans(); return; }
+  // Filter: keep only plans that include >= newCount servings of this food
+  S.compatPlans = S.compatPlans.filter(i => flatPlans[i*n+xi] >= newCount);
+}
+
+// ═══════════════════════════════════════════════
+//  FEASIBILITY  — plan lookup (exact) or 2-D DP fallback
+// ═══════════════════════════════════════════════
+function computeFeasibility(){
+  const foods = allFoods();
+  const feasMap = {};
+
+  // ── Plan-lookup path (exact) ──────────────────
+  if(precompIsValid() && S.precomp.count > 0){
+    const {flatPlans, foodIds, n} = S.precomp;
+    const fidx = Object.create(null);
+    foodIds.forEach((id,i)=>{ fidx[id]=i; });
+    const compat = S.compatPlans;
+
+    for(const f of foods){
+      const sNow = servingsOf(f.id);
+      if(sNow >= 2){ feasMap[f.id]=false; continue; }
+      const xi = fidx[f.id];
+      if(xi === undefined){
+        // Food not in precomp (added after last recompute) — optimistic
+        feasMap[f.id] = true;
+        continue;
+      }
+      // Feasible iff any compatible plan includes more than sNow servings of f
+      let ok = false;
+      for(let j=0;j<compat.length&&!ok;j++){
+        if(flatPlans[compat[j]*n+xi] > sNow) ok = true;
+      }
+      feasMap[f.id] = ok;
+    }
+    return feasMap;
+  }
+
+  // ── 2-D DP fallback (used when precomp absent/stale) ─────────────────────
+  // Exact for calories, protein, AND health separately (independent checks).
+  // May produce false-positives when joint constraints conflict.
+  return computeFeasibilityDP(foods.filter(f=>!isExcluded(f.id)), feasMap);
+}
+
+function computeFeasibilityDP(foods, feasMap){
+  feasMap = feasMap || {};
+  const {calGoal,calRange,proMin,minMeals,minHealth}=S.settings;
+  const calMin=calGoal-calRange, calMax=calGoal+calRange;
+
+  let calNow=0,proNow=0,mealsNow=0,hwNow=0;
+  for(const f of foods){
+    const s=servingsOf(f.id);
+    if(!s) continue;
+    calNow+=f.cal*s; proNow+=f.pro*s;
+    if(f.meal) mealsNow+=s;
+    hwNow+=f.h*f.cal*s;
+  }
+  calNow-=S.exCals;
+
+  const rem=foods
+    .filter(f=>servingsOf(f.id)<2)
+    .map(f=>({...f,maxAdded:2-servingsOf(f.id)}));
+  const n=rem.length;
+  const MC=Math.max(calMax, Math.ceil(calMax-calNow));
+  const NEGINF=-1e10;
+
+  // Protein DP: pref[i][c] = max protein from rem[0..i-1] with exactly c cal
+  const pref=Array.from({length:n+1},()=>new Int16Array(MC+1).fill(-1));
+  const suf =Array.from({length:n+1},()=>new Int16Array(MC+1).fill(-1));
+  pref[0][0]=0;
+  for(let i=0;i<n;i++){
+    const f=rem[i];
+    pref[i+1].set(pref[i]);
+    for(let s=1;s<=f.maxAdded;s++){
+      const addC=f.cal*s, addP=f.pro*s;
+      if(addC>MC) continue;
+      for(let c=MC;c>=addC;c--){
+        if(pref[i][c-addC]>=0){
+          const np=pref[i][c-addC]+addP;
+          if(np>pref[i+1][c]) pref[i+1][c]=np;
+        }
+      }
+    }
+  }
+  suf[n][0]=0;
+  for(let i=n-1;i>=0;i--){
+    const f=rem[i];
+    suf[i].set(suf[i+1]);
+    for(let s=1;s<=f.maxAdded;s++){
+      const addC=f.cal*s, addP=f.pro*s;
+      if(addC>MC) continue;
+      for(let c=MC;c>=addC;c--){
+        if(suf[i+1][c-addC]>=0){
+          const np=suf[i+1][c-addC]+addP;
+          if(np>suf[i][c]) suf[i][c]=np;
+        }
+      }
+    }
+  }
+  const sufMaxP=suf.map(arr=>{
+    const mx=new Int16Array(MC+2).fill(-1);
+    let best=-1;
+    for(let c=0;c<=MC;c++){if(arr[c]>best)best=arr[c];mx[c]=best;}
+    return mx;
+  });
+
+  // Health surplus DP: pref_h[i][c] = max health surplus from rem[0..i-1] with exactly c cal
+  const pref_h=Array.from({length:n+1},()=>new Float32Array(MC+1).fill(NEGINF));
+  const suf_h =Array.from({length:n+1},()=>new Float32Array(MC+1).fill(NEGINF));
+  pref_h[0][0]=0;
+  for(let i=0;i<n;i++){
+    const f=rem[i];
+    pref_h[i+1].set(pref_h[i]);
+    for(let s=1;s<=f.maxAdded;s++){
+      const addC=f.cal*s, addH=(f.h-minHealth)*f.cal*s;
+      if(addC>MC) continue;
+      for(let c=MC;c>=addC;c--){
+        if(pref_h[i][c-addC]>NEGINF){
+          const nh=pref_h[i][c-addC]+addH;
+          if(nh>pref_h[i+1][c]) pref_h[i+1][c]=nh;
+        }
+      }
+    }
+  }
+  suf_h[n][0]=0;
+  for(let i=n-1;i>=0;i--){
+    const f=rem[i];
+    suf_h[i].set(suf_h[i+1]);
+    for(let s=1;s<=f.maxAdded;s++){
+      const addC=f.cal*s, addH=(f.h-minHealth)*f.cal*s;
+      if(addC>MC) continue;
+      for(let c=MC;c>=addC;c--){
+        if(suf_h[i+1][c-addC]>NEGINF){
+          const nh=suf_h[i+1][c-addC]+addH;
+          if(nh>suf_h[i][c]) suf_h[i][c]=nh;
+        }
+      }
+    }
+  }
+  const sufMaxH=suf_h.map(arr=>{
+    const mx=new Float32Array(MC+2).fill(NEGINF);
+    let best=NEGINF;
+    for(let c=0;c<=MC;c++){if(arr[c]>best)best=arr[c];mx[c]=best;}
+    return mx;
+  });
+
+  let totMaxCal=0,totMaxPro=0,totMaxMeals=0,totMaxHS=0;
+  for(const f of rem){
+    totMaxCal +=f.cal*f.maxAdded;
+    totMaxPro +=f.pro*f.maxAdded;
+    if(f.meal) totMaxMeals+=f.maxAdded;
+    const sur=(f.h-minHealth)*f.cal*f.maxAdded;
+    if(sur>0) totMaxHS+=sur;
+  }
+
+  for(let xi=0;xi<n;xi++){
+    const X=rem[xi];
+    const rmCal   =totMaxCal   -X.cal*X.maxAdded;
+    const rmPro   =totMaxPro   -X.pro*X.maxAdded;
+    const rmMeals =totMaxMeals -(X.meal?X.maxAdded:0);
+    const xSurp   =(X.h-minHealth)*X.cal*X.maxAdded;
+    const rmHS    =totMaxHS-(xSurp>0?xSurp:0);
+
+    const pfx=pref[xi], sfx=suf[xi+1], sfxMx=sufMaxP[xi+1];
+    const pfx_h=pref_h[xi], sfx_h=suf_h[xi+1], sfxMxH=sufMaxH[xi+1];
+
+    let ok=false;
+    for(let sx=1;sx<=X.maxAdded&&!ok;sx++){
+      const calAX =calNow+sx*X.cal;
+      const proAX =proNow+sx*X.pro;
+      const mAX   =mealsNow+(X.meal?sx:0);
+      const hwAX  =hwNow+sx*X.h*X.cal;
+      const tcAX  =calAX+S.exCals;
+
+      const cNMin=Math.max(0,calMin-calAX);
+      const cNMax=calMax-calAX;
+      if(cNMax<0) continue;
+
+      const pNeed =Math.max(0,proMin-proAX);
+      const mNeed =Math.max(0,minMeals-mAX);
+      const hDef  =minHealth*tcAX-hwAX;
+
+      if(rmCal<cNMin)    continue;
+      if(rmPro<pNeed)    continue;
+      if(rmMeals<mNeed)  continue;
+      if(hDef>rmHS+1e-9) continue;
+
+      let protOk=false;
+      if(cNMin===0){
+        for(let c1=0;c1<=Math.min(cNMax,MC)&&!protOk;c1++){
+          const p1=pfx[c1]; if(p1<0) continue;
+          const c2max=Math.min(MC,cNMax-c1); if(c2max<0) continue;
+          const p2best=sfxMx[c2max]; if(p2best<0) continue;
+          if(p1+p2best>=pNeed) protOk=true;
+        }
+      } else {
+        for(let c1=0;c1<=Math.min(cNMax,MC)&&!protOk;c1++){
+          const p1=pfx[c1]; if(p1<0) continue;
+          const p2need=Math.max(0,pNeed-p1);
+          const c2lo=Math.max(0,cNMin-c1);
+          const c2hi=Math.min(MC,cNMax-c1);
+          for(let c2=c2lo;c2<=c2hi&&!protOk;c2++){
+            if(sfx[c2]>=p2need) protOk=true;
+          }
+        }
+      }
+      if(!protOk) continue;
+
+      let hlthOk=hDef<=0;
+      if(!hlthOk){
+        if(cNMin===0){
+          for(let c1=0;c1<=Math.min(cNMax,MC)&&!hlthOk;c1++){
+            const h1=pfx_h[c1]; if(h1<-1e9) continue;
+            const c2max=Math.min(MC,cNMax-c1); if(c2max<0) continue;
+            const h2best=sfxMxH[c2max]; if(h2best<-1e9) continue;
+            if(h1+h2best>=hDef-1e-6) hlthOk=true;
+          }
+        } else {
+          for(let c1=0;c1<=Math.min(cNMax,MC)&&!hlthOk;c1++){
+            const h1=pfx_h[c1]; if(h1<-1e9) continue;
+            const c2lo=Math.max(0,cNMin-c1);
+            const c2hi=Math.min(MC,cNMax-c1);
+            for(let c2=c2lo;c2<=c2hi&&!hlthOk;c2++){
+              if(sfx_h[c2]>-1e9&&sfx_h[c2]>=hDef-h1-1e-6) hlthOk=true;
+            }
+          }
+        }
+      }
+      if(protOk&&hlthOk) ok=true;
+    }
+    feasMap[X.id]=ok;
+  }
+
+  for(const f of foods){if(servingsOf(f.id)>=2) feasMap[f.id]=false;}
+  return feasMap;
+}
+
+// ═══════════════════════════════════════════════
+//  RENDER
+// ═══════════════════════════════════════════════
+function render(){
+  const stats=computeStats();
+  const feas=computeFeasibility();
+  renderBanner();
+  renderStats(stats, feas);
+  renderGrids(feas);
+  renderEaten();
+}
+
+function pct(v,max){return Math.min(100,Math.max(0,v/max*100)).toFixed(1)+'%'}
+function cls(v,goal){return v>=goal?'g':v>=goal*.75?'w':'b'}
+
+function renderBanner(){
+  const banner = document.getElementById('recompute-banner');
+  if(_computing){
+    banner.className='computing';
+    banner.textContent='⏳ Computing valid meal plans\u2026';
+    return;
+  }
+  const stale = !precompIsValid();
+  if(stale){
+    banner.className='';
+    banner.innerHTML='⚠ Greying may be inaccurate \u2014 food list or settings changed.'+
+      ' <button class="btn" id="btn-recompute" style="margin-left:4px">Recompute Now</button>';
+    document.getElementById('btn-recompute').addEventListener('click', startPrecompute);
+  } else {
+    banner.className='hidden';
+    banner.textContent='';
+  }
+}
+
+function renderStats(st){
+  const {calGoal,calRange,proMin,minMeals,minHealth}=S.settings;
+  const calMin=calGoal-calRange,calMax=calGoal+calRange;
+  const calEff=st.calNow+S.exCals;
+  const effGoal=calGoal+S.exCals, effMin=calMin+S.exCals, effMax=calMax+S.exCals;
+
+  const calPct=pct(Math.max(0,calEff),effMax);
+  const calColor=calEff>=effMin&&calEff<=effMax?'g':calEff>effMax?'b':calEff>=effMin*.9?'w':'b';
+  const proPct=pct(st.proNow,proMin);
+  const proColor=cls(st.proNow,proMin);
+  const hPct=pct(st.healthScore,minHealth);
+  const hColor=cls(st.healthScore,minHealth);
+  const mealsOk=st.mealsNow>=minMeals;
+  const exNote=S.exCals>0?` <small style="color:var(--ok)">+${S.exCals} exercise</small>`:'';
+  const planNote=precompIsValid()
+    ?` <small style="color:var(--muted);font-weight:400">(${S.precomp.count.toLocaleString()} plans)</small>`:'';
+
+  document.getElementById('stats-row').innerHTML=`
+    <div class="stat">
+      <div class="stat-lbl"><span>Calories${exNote}</span><span>${calEff} / ${effGoal} <small style="color:var(--muted)">(${effMin}\u2013${effMax})</small></span></div>
+      <div class="pbar"><div class="pbar-fill ${calColor}" style="width:${calPct}"></div></div>
+    </div>
+    <div class="stat">
+      <div class="stat-lbl"><span>Protein</span><span>${st.proNow}g / ${proMin}g</span></div>
+      <div class="pbar"><div class="pbar-fill ${proColor}" style="width:${proPct}"></div></div>
+    </div>
+    <div class="stat">
+      <div class="stat-lbl"><span>Health Score</span><span>${st.healthScore.toFixed(2)} / ${minHealth}</span></div>
+      <div class="pbar"><div class="pbar-fill ${hColor}" style="width:${hPct}"></div></div>
+    </div>
+    <div class="stat" style="justify-content:flex-end">
+      <div class="stat-lbl"><span>Meals${planNote}</span></div>
+      <div class="meals-badge ${mealsOk?'':'unmet'}">${mealsOk?'✓':'✗'} ${st.mealsNow} / ${minMeals} meals</div>
+    </div>`;
+
+  const allMet = calEff>=effMin && calEff<=effMax && st.proNow>=proMin && mealsOk && st.healthScore>=minHealth;
+  document.getElementById('goals-badge').classList.toggle('show',allMet);
+}
+
+// ── Restriction counts ────────────────────────
+// For each available food: how many currently-available foods would become
+// greyed if you were to select it? Uses compatPlans for exact O(n) check.
+function computeRestrictions(feas){
+  if(!precompIsValid()||!S.precomp||S.precomp.count===0) return {counts:{},denom:1};
+  const {flatPlans,foodIds,n}=S.precomp;
+  const compat=S.compatPlans;
+  const fidx=Object.create(null);
+  foodIds.forEach((id,i)=>{fidx[id]=i;});
+  const foods=allFoods();
+  const avail=foods.filter(f=>!isExcluded(f.id)&&feas[f.id]!==false&&servingsOf(f.id)<2);
+  const denom=Math.max(1,avail.length-1);
+  const counts=Object.create(null);
+  for(const f of avail){
+    const xi=fidx[f.id];
+    if(xi===undefined){counts[f.id]=0;continue;}
+    const sNow=servingsOf(f.id);
+    // subset of compatible plans that include ≥ sNow+1 servings of f
+    const sub=compat.filter(i=>flatPlans[i*n+xi]>sNow);
+    let locks=0;
+    for(const other of avail){
+      if(other.id===f.id) continue;
+      const xi2=fidx[other.id];
+      if(xi2===undefined) continue;
+      const sOther=servingsOf(other.id);
+      if(!sub.some(i=>flatPlans[i*n+xi2]>sOther)) locks++;
+    }
+    counts[f.id]=locks;
+  }
+  return {counts,denom};
+}
+
+function makeCard(f,feas,restrict){
+  const s=servingsOf(f.id);
+  const isFeas=feas[f.id]!==false;
+  const maxed=s>=2;
+  const eaten=s>0;
+  const xed=isExcluded(f.id);
+
+  const div=document.createElement('div');
+  let cls='card';
+  if(maxed) cls+=' maxed';
+  if(!isFeas) cls+=' grey';
+  if(eaten) cls+=' eaten';
+  if(xed) cls+=' xed';
+  div.className=cls;
+
+  // Restriction bar — only for available (not greyed, not maxed, not x'd) foods
+  let rbarHtml='';
+  if(isFeas&&!maxed&&!xed&&restrict&&restrict.counts[f.id]!==undefined){
+    const locks=restrict.counts[f.id];
+    const fillPct=(locks/restrict.denom*100).toFixed(1);
+    const fillColor=locks===0?'transparent':locks<=2?'var(--warn)':locks<=5?'#f97316':'var(--bad)';
+    const tip=locks===0?'No other foods affected':`Locks out ${locks} food${locks===1?'':'s'} if selected`;
+    rbarHtml=`<div class="rbar" title="${tip}"><div class="rbar-fill" style="width:${fillPct}%;background:${fillColor}"></div></div>`;
+  }
+
+  // X button title depends on state
+  const xTitle = xed ? 'Un-skip (allow again)'
+               : eaten ? `No more — cap at ${s}`
+               : 'Skip today';
+  const xLabel = xed ? '↺' : '✕';
+
+  div.innerHTML=`
+    <div class="hbar" style="background:${healthColor(f.h)}"></div>
+    <div class="cbody">
+      <div class="cname">${f.name}</div>
+      <div class="cstats"><b>${f.cal}</b> cal &nbsp; <b>${f.pro}g</b> prot &nbsp; <span style="color:${healthColor(f.h)};font-weight:700">♥${f.h.toFixed(2)}</span></div>
+    </div>
+    <div class="cfoot">
+      ${eaten?`<span class="sbadge${s===2?' two':''}">${s}×</span>`:'<span></span>'}
+      <div style="display:flex;gap:4px;align-items:center">
+        ${eaten?`<button class="minus-btn" data-rm="${f.id}" title="Remove serving">−</button>`:''}
+        ${s===1&&isFeas&&!maxed&&!xed?`<button class="plus-btn" data-id="${f.id}" title="Add 2nd serving">＋</button>`:''}
+        <button class="edit-btn" data-edit="${f.id}">✎</button>
+        ${!maxed?`<button class="edit-btn" data-excl="${f.id}" title="${xTitle}">${xLabel}</button>`:''}
+      </div>
+    </div>
+    ${rbarHtml}`;
+
+  // Main click adds a serving — disabled when maxed, not feasible, or x'd
+  if(!maxed&&isFeas&&!xed){
+    div.addEventListener('click',e=>{
+      if(e.target.closest('[data-edit]')) return;
+      if(e.target.closest('[data-rm]')) return;
+      if(e.target.closest('[data-excl]')) return;
+      if(e.target.closest('.plus-btn')) return;
+      addServing(f.id);
+    });
+  }
+  // Right-click toggles exclude
+  div.addEventListener('contextmenu',e=>{
+    if(servingsOf(f.id)>=2) return;
+    e.preventDefault();
+    toggleExclude(f.id);
+  });
+  // Long-press toggles exclude (touch)
+  let _lpTimer=null;
+  div.addEventListener('touchstart',e=>{
+    if(servingsOf(f.id)>=2) return;
+    _lpTimer=setTimeout(()=>{_lpTimer=null;toggleExclude(f.id);},550);
+  },{passive:true});
+  const cancelLP=()=>{if(_lpTimer){clearTimeout(_lpTimer);_lpTimer=null;}};
+  div.addEventListener('touchend',cancelLP);
+  div.addEventListener('touchmove',cancelLP);
+  div.addEventListener('touchcancel',cancelLP);
+  const minusBtn=div.querySelector('[data-rm]');
+  if(minusBtn) minusBtn.addEventListener('click',e=>{e.stopPropagation();removeServing(f.id);});
+  const plusBtn=div.querySelector('.plus-btn');
+  if(plusBtn) plusBtn.addEventListener('click',e=>{e.stopPropagation();addServing(f.id);});
+  const editBtn=div.querySelector('[data-edit]');
+  editBtn.addEventListener('click',e=>{e.stopPropagation();openEditModal(f.id);});
+  const exclBtn=div.querySelector('[data-excl]');
+  if(exclBtn) exclBtn.addEventListener('click',e=>{e.stopPropagation();toggleExclude(f.id);});
+  return div;
+}
+
+function renderGrids(feas){
+  const foods=allFoods();
+  const restrict=computeRestrictions(feas);
+  const mg=document.getElementById('meals-grid');
+  const sg=document.getElementById('snacks-grid');
+  mg.innerHTML=''; sg.innerHTML='';
+  const sorted=[...foods].sort((a,b)=>a.name.localeCompare(b.name));
+  for(const f of sorted){
+    (f.meal?mg:sg).appendChild(makeCard(f,feas,restrict));
+  }
+}
+
+function renderEaten(){
+  const foods=allFoods();
+  const el=document.getElementById('eaten-list');
+  const eaten=foods.filter(f=>servingsOf(f.id)>0);
+  if(!eaten.length){el.innerHTML='<span class="empty">Nothing eaten yet today.</span>';return;}
+  el.innerHTML='';
+  for(const f of eaten){
+    const s=servingsOf(f.id);
+    const chip=document.createElement('div');
+    chip.className='eaten-chip';
+    chip.innerHTML=`<strong>${f.name}</strong> <span>×${s} · ${f.cal*s} cal · ${f.pro*s}g prot</span>
+      <button class="rm-btn" title="Remove 1 serving">−</button>`;
+    chip.querySelector('.rm-btn').addEventListener('click',()=>removeServing(f.id));
+    el.appendChild(chip);
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  STATE MUTATIONS
+// ═══════════════════════════════════════════════
+function addServing(id){
+  const cur=servingsOf(id);
+  if(cur>=2) return;
+  const newCount=(cur||0)+1;
+  S.servings[id]=newCount;
+  updateCompatPlans(id, newCount, true);
+  saveState(); render();
+}
+function removeServing(id){
+  const cur=servingsOf(id);
+  if(!cur) return;
+  if(cur<=1) delete S.servings[id];
+  else S.servings[id]=cur-1;
+  updateCompatPlans(id, S.servings[id]||0, false);
+  saveState(); render();
+}
+function toggleExclude(id){
+  if(servingsOf(id)>=2) return; // already maxed, nothing to cap
+  if(S.excluded[id]){
+    // Un-excluding may grow the compat set → full rebuild from precomp
+    delete S.excluded[id];
+    buildCompatPlans();
+  } else {
+    // Excluding caps this food at its current eaten count.
+    // Shrinks the compat set → cheap incremental filter, no worker needed.
+    S.excluded[id] = true;
+    if(S.precomp && precompIsValid()){
+      const {flatPlans, foodIds, n} = S.precomp;
+      const xi = foodIds.indexOf(id);
+      if(xi>=0){
+        const cap = servingsOf(id);
+        S.compatPlans = S.compatPlans.filter(i => flatPlans[i*n+xi] === cap);
+      }
+    }
+  }
+  saveState(); render();
+}
+
+// ═══════════════════════════════════════════════
+//  MODAL SYSTEM
+// ═══════════════════════════════════════════════
+function openModal(html,onSubmit){
+  const box=document.getElementById('mbox');
+  box.innerHTML=html;
+  document.getElementById('overlay').classList.remove('h');
+  if(onSubmit){
+    const form=box.querySelector('form');
+    if(form) form.addEventListener('submit',e=>{e.preventDefault();onSubmit(form);});
+  }
+  box.querySelector('.btn-cancel')?.addEventListener('click',closeModal);
+}
+function closeModal(){document.getElementById('overlay').classList.add('h');}
+document.getElementById('overlay').addEventListener('click',e=>{if(e.target===document.getElementById('overlay'))closeModal();});
+
+// ── Settings modal ────────────────────────────
+function openSettings(){
+  const s=S.settings;
+  openModal(`<h2>⚙ Settings</h2>
+    <form>
+      <div class="fg"><label>Calorie Goal</label><input type="number" name="calGoal" value="${s.calGoal}" min="500" max="5000" step="50"></div>
+      <div class="fg"><label>Calorie Range (±)</label><input type="number" name="calRange" value="${s.calRange}" min="0" max="300" step="10"></div>
+      <div class="fg"><label>Protein Minimum (g)</label><input type="number" name="proMin" value="${s.proMin}" min="0" max="400" step="5"></div>
+      <div class="fg"><label>Minimum Meals</label><input type="number" name="minMeals" value="${s.minMeals}" min="0" max="10" step="1"></div>
+      <div class="fg"><label>Min Avg Health Score: <span class="rv" id="hv">${s.minHealth.toFixed(2)}</span></label>
+        <input type="range" name="minHealth" value="${s.minHealth}" min="0" max="1" step="0.05" oninput="document.getElementById('hv').textContent=parseFloat(this.value).toFixed(2)"></div>
+      <div class="mactions"><button type="button" class="btn btn-cancel">Cancel</button><button type="submit" class="btn pri">Save</button></div>
+    </form>`,
+    form=>{
+      const d=new FormData(form);
+      S.settings={
+        calGoal:+d.get('calGoal'), calRange:+d.get('calRange'),
+        proMin:+d.get('proMin'), minMeals:+d.get('minMeals'),
+        minHealth:+d.get('minHealth'),
+      };
+      // Settings change invalidates precomp (hash mismatch will trigger banner)
+      saveState(); closeModal(); render();
+    });
+}
+
+// ── Add Food modal ────────────────────────────
+function openAddModal(){
+  openModal(`<h2>＋ Add Food</h2>
+    <form>
+      <div class="fg"><label>Name</label><input type="text" name="name" required placeholder="Food name"></div>
+      <div class="fg"><label>Calories</label><input type="number" name="cal" required min="0" max="5000" placeholder="0"></div>
+      <div class="fg"><label>Protein (g)</label><input type="number" name="pro" required min="0" max="500" placeholder="0"></div>
+      <div class="fg"><label>Health Score: <span class="rv" id="hv2">0.50</span></label>
+        <input type="range" name="h" value="0.5" min="0" max="1" step="0.05" oninput="document.getElementById('hv2').textContent=parseFloat(this.value).toFixed(2)"></div>
+      <div class="fg">
+        <label class="tog-row" id="meal-tog-lbl">
+          <div class="tog" id="meal-tog"></div> Count as a Meal
+        </label>
+      </div>
+      <div class="sep"></div>
+      <div class="fg">
+        <label class="tog-row" id="perm-tog-lbl">
+          <div class="tog on" id="perm-tog"></div> Save Permanently
+        </label>
+        <div class="note">Temporary foods are cleared when you close the tab.</div>
+      </div>
+      <div class="mactions"><button type="button" class="btn btn-cancel">Cancel</button><button type="submit" class="btn pri">Add Food</button></div>
+    </form>`,
+    form=>{
+      let mealOn=document.getElementById('meal-tog').classList.contains('on');
+      let permOn=document.getElementById('perm-tog').classList.contains('on');
+      const d=new FormData(form);
+      const newFood={
+        id:'custom-'+Date.now(),
+        name:d.get('name').trim(),
+        cal:+d.get('cal'), pro:+d.get('pro'),
+        h:+d.get('h'), meal:mealOn,
+      };
+      if(!newFood.name||newFood.cal<0) return;
+      if(permOn){S.custom.push(newFood);}
+      else{S.temp.push(newFood);}
+      // Food change invalidates precomp (hash mismatch will trigger banner)
+      saveState(); closeModal(); render();
+    });
+  wireToggle('meal-tog','meal-tog-lbl');
+  wireToggle('perm-tog','perm-tog-lbl');
+}
+
+// ── Edit Food modal ───────────────────────────
+function openEditModal(id){
+  const f=getFoodById(id);
+  if(!f) return;
+  const isBase=f.isBase;
+  openModal(`<h2>✎ Edit: ${f.name}</h2>
+    <form>
+      <div class="fg"><label>Name</label><input type="text" name="name" value="${esc(f.name)}" required></div>
+      <div class="fg"><label>Calories</label><input type="number" name="cal" value="${f.cal}" required min="0" max="5000"></div>
+      <div class="fg"><label>Protein (g)</label><input type="number" name="pro" value="${f.pro}" required min="0" max="500"></div>
+      <div class="fg"><label>Health Score: <span class="rv" id="hv3">${f.h.toFixed(2)}</span></label>
+        <input type="range" name="h" value="${f.h}" min="0" max="1" step="0.05" oninput="document.getElementById('hv3').textContent=parseFloat(this.value).toFixed(2)"></div>
+      <div class="fg">
+        <label class="tog-row" id="emeal-tog-lbl">
+          <div class="tog${f.meal?' on':''}" id="emeal-tog"></div> Count as a Meal
+        </label>
+      </div>
+      <div class="mactions">
+        ${isBase?`<button type="button" class="btn" id="btn-reset-food">Reset to Default</button>`
+                :`<button type="button" class="btn dng" id="btn-del-food">Delete</button>`}
+        <button type="button" class="btn btn-cancel">Cancel</button>
+        <button type="submit" class="btn pri">Save</button>
+      </div>
+    </form>`,
+    form=>{
+      let mealOn=document.getElementById('emeal-tog').classList.contains('on');
+      const d=new FormData(form);
+      const upd={name:d.get('name').trim(),cal:+d.get('cal'),pro:+d.get('pro'),h:+d.get('h'),meal:mealOn};
+      if(isBase){
+        S.overrides[id]=upd;
+      } else {
+        const ci=S.custom.findIndex(x=>x.id===id);
+        if(ci>=0) S.custom[ci]={...S.custom[ci],...upd};
+        const ti=S.temp.findIndex(x=>x.id===id);
+        if(ti>=0) S.temp[ti]={...S.temp[ti],...upd};
+      }
+      // Food change invalidates precomp (hash mismatch will trigger banner)
+      saveState(); closeModal(); render();
+    });
+  wireToggle('emeal-tog','emeal-tog-lbl');
+
+  setTimeout(()=>{
+    document.getElementById('btn-reset-food')?.addEventListener('click',()=>{
+      delete S.overrides[id]; saveState(); closeModal(); render();
+    });
+    document.getElementById('btn-del-food')?.addEventListener('click',()=>{
+      S.custom=S.custom.filter(x=>x.id!==id);
+      S.temp=S.temp.filter(x=>x.id!==id);
+      delete S.servings[id];
+      saveState(); closeModal(); render();
+    });
+  },0);
+}
+
+function wireToggle(togId,lblId){
+  const tog=document.getElementById(togId);
+  const lbl=document.getElementById(lblId);
+  if(lbl) lbl.addEventListener('click',()=>tog.classList.toggle('on'));
+}
+
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+// ── Reset day ─────────────────────────────────
+function resetDay(){
+  if(!confirm('Clear all eaten foods for today?')) return;
+  S.servings={}; S.exCals=0; S.temp=[]; S.excluded={};
+  document.getElementById('ex-input').value='';
+  buildCompatPlans(); // rebuild with empty eaten state
+  saveState(); render();
+}
+
+// ═══════════════════════════════════════════════
+//  EVENT LISTENERS
+// ═══════════════════════════════════════════════
+document.getElementById('btn-add').addEventListener('click',openAddModal);
+document.getElementById('btn-settings').addEventListener('click',openSettings);
+document.getElementById('btn-reset').addEventListener('click',resetDay);
+document.getElementById('ex-input').addEventListener('input',e=>{
+  S.exCals=Math.max(0,parseInt(e.target.value)||0);
+  buildCompatPlans();
+  saveState(); render();
+  // Auto-recompute 1.5s after exercise settles (exCals is now in the hash)
+  clearTimeout(_exTimer);
+  _exTimer = setTimeout(()=>{ if(!precompIsValid()&&!_computing) startPrecompute(); }, 1500);
+});
+
+// ═══════════════════════════════════════════════
+//  INIT
+// ═══════════════════════════════════════════════
+loadState();
+document.getElementById('ex-input').value=S.exCals||'';
+if(S.precomp && precompIsValid()) buildCompatPlans();
+render();
+</script>
+</body>
+</html>
