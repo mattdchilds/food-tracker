@@ -75,18 +75,18 @@ select:disabled{opacity:.6;cursor:not-allowed}
   .stat-val{font-size:12px}
   .ex-row{margin-top:6px;padding-top:6px;gap:6px}
   #sort-row{padding:0 10px}
-  .food-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:7px}
+  .food-grid{grid-template-columns:repeat(auto-fill,minmax(116px,1fr));gap:5px}
   #eaten-sec{padding:0 10px 24px}
-  .plus-btn{padding:4px 12px;font-size:15px}
-  .minus-btn{padding:4px 10px}
-  .edit-btn{padding:4px 8px;font-size:11px}
+  .plus-btn{padding:3px 10px;font-size:14px}
+  .minus-btn{padding:3px 8px}
+  .edit-btn{padding:3px 6px;font-size:11px}
   input[type=number],input[type=text],select{font-size:16px}
   #overlay{padding:8px}
   .mbox{padding:16px;max-height:calc(100dvh - 16px)}
 }
 .sec-hdr{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:10px}
-.food-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:8px}
-.card{background:var(--surface);border:2px solid var(--border);border-radius:var(--r);cursor:pointer;text-align:left;transition:transform .12s,border-color .12s,box-shadow .12s,opacity .2s,filter .2s;position:relative;overflow:hidden;box-shadow:var(--sh);display:flex;flex-direction:column;min-height:120px;user-select:none}
+.food-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(126px,1fr));gap:6px}
+.card{background:var(--surface);border:2px solid var(--border);border-radius:var(--r);cursor:pointer;text-align:left;transition:transform .12s,border-color .12s,box-shadow .12s,opacity .2s,filter .2s;position:relative;overflow:hidden;box-shadow:var(--sh);display:flex;flex-direction:column;min-height:88px;user-select:none}
 .card:hover:not(.grey){border-color:var(--primary);box-shadow:var(--sh2);transform:translateY(-2px)}
 .card.grey{opacity:.32;filter:grayscale(.7);cursor:pointer}
 .card.eaten{border-color:var(--primary);background:var(--primary-lt)}
@@ -94,19 +94,19 @@ select:disabled{opacity:.6;cursor:not-allowed}
 .card.xed{opacity:.35;filter:grayscale(.8);cursor:not-allowed;border-style:dashed;border-color:var(--bad)}
 .card.xed.eaten{opacity:.55;filter:grayscale(.4);border-color:var(--bad);background:var(--bad-lt)}
 .card.xed .cname{text-decoration:line-through;text-decoration-color:var(--bad);text-decoration-thickness:2px}
-.hbar{height:4px;width:100%;flex-shrink:0}
-.cbody{padding:9px 9px 6px;flex:1;display:flex;flex-direction:column;gap:3px}
-.cname{font-weight:700;font-size:12px;line-height:1.35}
-.cstats{font-size:11px;color:var(--muted);display:flex;gap:6px;flex-wrap:wrap}
+.hbar{height:3px;width:100%;flex-shrink:0}
+.cbody{padding:6px 7px 4px;flex:1;display:flex;flex-direction:column;gap:2px}
+.cname{font-weight:700;font-size:12px;line-height:1.25}
+.cstats{font-size:10px;color:var(--muted);display:flex;gap:5px;flex-wrap:wrap}
 .cstats b{color:var(--text)}
-.cfoot{display:flex;align-items:center;justify-content:space-between;padding:0 8px 7px;min-height:26px;gap:4px}
-.sbadge{background:var(--primary);color:#fff;border-radius:5px;padding:2px 7px;font-size:11px;font-weight:800}
+.cfoot{display:flex;align-items:center;justify-content:space-between;padding:0 6px 5px;min-height:22px;gap:4px}
+.sbadge{background:var(--primary);color:#fff;border-radius:5px;padding:1px 6px;font-size:10px;font-weight:800}
 .sbadge.two{background:var(--muted)}
-.plus-btn{background:var(--ok);color:#fff;border:none;border-radius:6px;padding:2px 8px;font-size:14px;font-weight:800;cursor:pointer;line-height:1.3;flex-shrink:0}
+.plus-btn{background:var(--ok);color:#fff;border:none;border-radius:6px;padding:1px 7px;font-size:13px;font-weight:800;cursor:pointer;line-height:1.3;flex-shrink:0}
 .plus-btn:hover{background:#15803d}
-.minus-btn{background:none;border:1px solid var(--border);border-radius:5px;padding:2px 7px;font-size:13px;font-weight:700;cursor:pointer;color:var(--bad);flex-shrink:0;line-height:1.2}
+.minus-btn{background:none;border:1px solid var(--border);border-radius:5px;padding:1px 6px;font-size:12px;font-weight:700;cursor:pointer;color:var(--bad);flex-shrink:0;line-height:1.2}
 .minus-btn:hover{background:var(--bad-lt)}
-.edit-btn{background:none;border:1px solid var(--border);border-radius:5px;padding:2px 5px;font-size:10px;cursor:pointer;color:var(--muted);flex-shrink:0}
+.edit-btn{background:none;border:1px solid var(--border);border-radius:5px;padding:1px 4px;font-size:10px;cursor:pointer;color:var(--muted);flex-shrink:0}
 .edit-btn:hover{background:var(--bg);color:var(--text)}
 .rbar{height:3px;width:100%;flex-shrink:0;background:var(--border)}
 .rbar-fill{height:100%;transition:width .3s,background .3s}
@@ -163,11 +163,14 @@ select:disabled{opacity:.6;cursor:not-allowed}
 .cat-toggle{font-size:13px;transition:transform .2s;display:inline-block;color:var(--muted);padding-left:6px}
 .cat-toggle.collapsed{transform:rotate(-90deg)}
 .hidden{display:none}
-.goal-slider-row{display:flex;align-items:center;gap:6px;margin-top:3px}
-.goal-slider-row input[type=range]{flex:1;height:12px;cursor:pointer;accent-color:var(--primary);opacity:.6}
-.goal-slider-row input[type=range]:hover{opacity:1}
-.goal-slider-lbl{font-size:10px;color:var(--muted);white-space:nowrap;min-width:40px;text-align:right}
-.goal-slider-lbl.modified{color:var(--warn)}
+.chat-log{display:flex;flex-direction:column;gap:8px;max-height:55vh;overflow-y:auto;margin-bottom:12px;padding-right:2px}
+.chat-msg{border-radius:10px;padding:8px 11px;font-size:13px;line-height:1.45;max-width:88%;white-space:pre-wrap;overflow-wrap:break-word}
+.chat-msg.user{align-self:flex-end;background:var(--primary);color:#fff}
+.chat-msg.ai{align-self:flex-start;background:var(--bg);border:1px solid var(--border)}
+.chat-msg.sys{align-self:center;background:none;color:var(--muted);font-size:11px;font-style:italic;padding:0;max-width:100%}
+.chat-msg.tool{align-self:flex-start;background:var(--ok-lt);color:var(--ok);font-size:12px;font-weight:600;padding:5px 10px}
+.chat-input-row{display:flex;gap:6px}
+.chat-input-row input{flex:1;width:auto}
 </style>
 </head>
 <body>
@@ -177,6 +180,7 @@ select:disabled{opacity:.6;cursor:not-allowed}
     <h1>🍽 Meal Planner</h1>
     <div class="hdr-actions">
       <button class="btn" id="btn-add">＋ Add Food</button>
+      <button class="btn" id="btn-ai">✨ AI</button>
       <button class="btn" id="btn-library">📚 Library</button>
       <button class="btn" id="btn-settings">⚙ Goals</button>
       <button class="btn" id="btn-tabs">⊞ Tabs</button>
@@ -1297,12 +1301,10 @@ function fmtVal(v, g){
   return r%1===0 ? String(r|0) : r.toFixed(1);
 }
 
-let _lastSt = null;
 function effThr(g){ return (S.tempGoals&&S.tempGoals[g.id]!==undefined) ? S.tempGoals[g.id] : g.threshold; }
 function effGoalCal(g){ return (S.tempGoals&&S.tempGoals[g.id]!==undefined) ? S.tempGoals[g.id] : g.goal; }
 
 function renderStats(st){
-  _lastSt = st;
   const {sums, avgs} = st;
   const anyEaten = hasEaten();
   const incValid = anyEaten && S.incFeas && S.incFeas.hash===incFeasHash();
@@ -1322,22 +1324,16 @@ function renderStats(st){
       const inWin=rawCal>=effMin&&rawCal<=effMax;
       const color=inWin?'g':rawCal>effMax?'b':rawCal>=effMin*.9?'w':'b';
       const exNote=S.exCals>0?` <small style="color:var(--ok)">+${S.exCals} burn</small>`:'';
-      const isModified=S.tempGoals&&S.tempGoals[g.id]!==undefined;
-      const sMin=Math.round(g.goal*0.4/50)*50, sMax=Math.round(g.goal*1.8/50)*50, sStep=50;
       html+=`<div class="stat">
         <div class="stat-lbl"><span>${g.name}${exNote}</span><span>${rawCal} / ${effGoal} <small style="color:var(--muted)">(${effMin}–${effMax})</small></span></div>
         <div class="pbar"><div class="pbar-fill ${color}" style="width:${pctFill}"></div></div>
-        <div class="goal-slider-row"><input type="range" data-gid="${g.id}" min="${sMin}" max="${sMax}" step="${sStep}" value="${baseGoal}"><span class="goal-slider-lbl${isModified?' modified':''}">${isModified?'✱ ':''}${baseGoal}</span></div>
       </div>`;
     } else if(g.type==='count_min'){
       const thr=effThr(g);
       const val=sums[g.id]||0; const ok=val>=thr;
-      const isModified=S.tempGoals&&S.tempGoals[g.id]!==undefined;
-      const sMax=Math.max(g.threshold*3,6), sStep=1;
       html+=`<div class="stat" style="justify-content:flex-end">
         <div class="stat-lbl"><span>${g.name}${planNote}</span></div>
         <div class="meals-badge ${ok?'':'unmet'}">${ok?'✓':'✗'} ${val} / ${thr} ${g.name.toLowerCase()}</div>
-        <div class="goal-slider-row"><input type="range" data-gid="${g.id}" min="1" max="${sMax}" step="${sStep}" value="${thr}"><span class="goal-slider-lbl${isModified?' modified':''}">${isModified?'✱ ':''}${thr}</span></div>
       </div>`;
     } else {
       const isAvg=(g.type==='avg_min'||g.type==='avg_max');
@@ -1347,29 +1343,14 @@ function renderStats(st){
       const pctFill=Math.min(100,thr>0?val/thr*100:0).toFixed(1)+'%';
       const color=progressColor(val,thr,g.type==='max'||g.type==='avg_max');
       const dirLabel=(g.type==='max'||g.type==='avg_max')?'≤':'≥';
-      const isModified=S.tempGoals&&S.tempGoals[g.id]!==undefined;
-      const baseMax=Math.max(g.threshold*3,10);
-      const sStep=g.threshold>=100?5:g.threshold>=10?1:.1;
       html+=`<div class="stat">
         <div class="stat-lbl"><span>${g.name}</span><span>${fmtVal(val,g)}${unit} / ${dirLabel}${thr}${unit}</span></div>
         <div class="pbar"><div class="pbar-fill ${color}" style="width:${pctFill}"></div></div>
-        <div class="goal-slider-row"><input type="range" data-gid="${g.id}" min="0" max="${baseMax}" step="${sStep}" value="${thr}"><span class="goal-slider-lbl${isModified?' modified':''}">${isModified?'✱ ':''}${thr}${unit}</span></div>
       </div>`;
     }
   }
   document.getElementById('stats-row').innerHTML=html;
   document.getElementById('goals-badge').classList.toggle('show', allGoalsMet(sums,avgs));
-
-  document.querySelectorAll('.goal-slider-row input[type=range]').forEach(slider=>{
-    slider.addEventListener('input',()=>{
-      if(!S.tempGoals) S.tempGoals={};
-      S.tempGoals[slider.dataset.gid]=+slider.value;
-      renderStats(_lastSt);
-    });
-    slider.addEventListener('change',()=>{
-      saveDayState();
-    });
-  });
 }
 
 function makeCard(f, feas, ppcRange){
@@ -2239,9 +2220,222 @@ function resetDay(){
 }
 
 // ═══════════════════════════════════════════════
+//  AI ASSISTANT  (OpenAI, browser-direct)
+// ═══════════════════════════════════════════════
+const AI = {
+  msgs: [],   // chat history in OpenAI message format; role '_sys' entries are local-only
+  busy: false,
+};
+function aiKey(){ return LS.get(lk('ai_key'),''); }
+function aiModel(){ return LS.get(lk('ai_model'),'gpt-5-mini'); }
+
+function aiSystemPrompt(){
+  const goalLines=S.goals.map(g=>{
+    if(g.type==='range') return `- ${g.name} (id "${g.id}"): target ${effGoalCal(g)} ± ${g.range}${g.unit?' '+g.unit:''}`;
+    const dir=(g.type==='max'||g.type==='avg_max')?'at most':'at least';
+    const kind=(g.type==='avg_min'||g.type==='avg_max')?'calorie-weighted average ':'';
+    const cnt=g.type==='count_min'?' (count of qualifying foods eaten)':'';
+    return `- ${g.name} (id "${g.id}"): ${kind}${dir} ${effThr(g)}${g.unit?' '+g.unit:''}${cnt}`;
+  }).join('\n');
+
+  const metricGoals=S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min');
+  const foodLines=allFoods().map(f=>{
+    const bits=metricGoals.map(g=>`${g.id} ${fmtVal(getMetric(f,g),g)}`).join(', ');
+    return `- ${f.name}: ${f.cal} cal, ${bits} [${getCategoryName(getFoodCategory(f))}]`;
+  }).join('\n');
+
+  const eaten=allFoods().filter(f=>servingsOf(f.id)>0)
+    .map(f=>`- ${f.name} ×${servingsOf(f.id)} (${f.cal*servingsOf(f.id)} cal)`).join('\n')||'- nothing yet';
+
+  const hasHealth=S.goals.some(g=>g.id==='health');
+  const healthNote=hasHealth
+    ?'\nThe "health" metric is a 0–1 score per food: ~0.10–0.20 junk food (candy, ice cream), ~0.35–0.45 fast food, ~0.55 average home cooking, ~0.70–0.85 wholesome (oats, eggs, legumes), ~0.90+ fruits/vegetables.'
+    :'';
+
+  return `You are the built-in assistant of a personal meal-planner web app. The user plans and tracks daily food against goals.
+
+Daily goals:
+${goalLines}
+
+Tabs (categories): ${S.categories.map(c=>`"${c.id}" = ${c.name}`).join(', ')}
+
+Food library (per-serving values):
+${foodLines}
+
+Eaten today:
+${eaten}
+Exercise burned today: ${S.exCals} cal
+${healthNote}
+You can add new foods with the add_food tool. When the user mentions a food that is not in the library, estimate realistic per-serving values for every goal metric yourself — do not ask for values unless the food is truly ambiguous. Default to a temporary food (permanent=false, lasts today only) unless the user asks to save it to the library. After a tool call succeeds, confirm briefly with the values you used. Keep answers short and practical.`;
+}
+
+function aiTools(){
+  const extraProps={};
+  for(const g of S.goals){
+    if(g.id==='cal'||g.type==='count_min') continue;
+    extraProps[g.id]={type:'number',description:`${g.name}${g.unit?' in '+g.unit:''} per serving`};
+  }
+  return [{
+    type:'function',
+    function:{
+      name:'add_food',
+      description:'Add a new food to the app. Fill in every goal metric with provided or estimated per-serving values.',
+      parameters:{
+        type:'object',
+        properties:{
+          name:{type:'string',description:'Display name of the food'},
+          cal:{type:'number',description:'Calories per serving'},
+          extras:{type:'object',description:'Per-serving value for each goal metric',properties:extraProps},
+          permanent:{type:'boolean',description:'true = save permanently to the library; false = temporary food for today only (default)'},
+          category:{type:'string',enum:S.categories.map(c=>c.id),description:'Tab to place the food in'},
+          maxServings:{type:'integer',description:'Max servings per day the solver may use (default 2)'},
+        },
+        required:['name','cal','extras'],
+      },
+    },
+  }];
+}
+
+function aiExecTool(name,args){
+  if(name!=='add_food') return {ok:false,error:'Unknown tool: '+name};
+  const foodName=String(args.name||'').trim();
+  if(!foodName) return {ok:false,error:'name is required'};
+  const food={
+    id:'custom-'+Date.now()+'-'+Math.floor(Math.random()*1e4),
+    name:foodName,
+    cal:Math.max(0,Math.round(+args.cal||0)),
+    maxServings:Math.max(1,parseInt(args.maxServings)||2),
+    category:S.categories.some(c=>c.id===args.category)?args.category:'',
+    extras:{},
+  };
+  for(const g of S.goals){
+    if(g.id==='cal'||g.type==='count_min') continue;
+    const v=args.extras&&args.extras[g.id];
+    food.extras[g.id]=v!==undefined&&v!==null?+v||0:(g.default??0);
+  }
+  if(args.permanent) S.custom.push(food); else S.temp.push(food);
+  saveState(); render();
+  return {ok:true,added:food.name,cal:food.cal,permanent:!!args.permanent,extras:food.extras};
+}
+
+async function aiSend(text){
+  AI.msgs.push({role:'user',content:text});
+  AI.busy=true; renderChatLog();
+  try{
+    for(let round=0; round<6; round++){
+      const res=await fetch('https://api.openai.com/v1/chat/completions',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+aiKey()},
+        body:JSON.stringify({
+          model:aiModel(),
+          messages:[{role:'system',content:aiSystemPrompt()},...AI.msgs.filter(m=>m.role!=='_sys')],
+          tools:aiTools(),
+        }),
+      });
+      if(!res.ok){
+        let em='HTTP '+res.status;
+        try{const j=await res.json();em=j.error?.message||em;}catch{}
+        throw new Error(em);
+      }
+      const data=await res.json();
+      const msg=data.choices?.[0]?.message;
+      if(!msg) throw new Error('Empty response from API');
+      AI.msgs.push(msg);
+      if(msg.tool_calls&&msg.tool_calls.length){
+        for(const tc of msg.tool_calls){
+          let result;
+          try{ result=aiExecTool(tc.function.name,JSON.parse(tc.function.arguments||'{}')); }
+          catch(e){ result={ok:false,error:String(e.message||e)}; }
+          AI.msgs.push({role:'tool',tool_call_id:tc.id,content:JSON.stringify(result)});
+        }
+        renderChatLog();
+        continue; // let the model see tool results and respond
+      }
+      break;
+    }
+  }catch(e){
+    AI.msgs.push({role:'_sys',content:'⚠ '+(e.message||e)});
+  }
+  AI.busy=false; renderChatLog();
+}
+
+function renderChatLog(){
+  const el=document.getElementById('chat-log');
+  if(!el) return;
+  let html='';
+  if(!AI.msgs.length){
+    html+=`<div class="chat-msg sys">Ask me to add foods — e.g. "add a bowl of chili as a temp food" — and I'll estimate the values.</div>`;
+  }
+  for(const m of AI.msgs){
+    if(m.role==='user') html+=`<div class="chat-msg user">${esc(m.content)}</div>`;
+    else if(m.role==='assistant'&&m.content) html+=`<div class="chat-msg ai">${esc(m.content)}</div>`;
+    else if(m.role==='tool'){
+      let r=null; try{r=JSON.parse(m.content);}catch{}
+      if(r&&r.ok) html+=`<div class="chat-msg tool">✓ Added "${esc(r.added)}" — ${r.cal} cal (${r.permanent?'saved to library':'temporary, today only'})</div>`;
+      else if(r) html+=`<div class="chat-msg sys">⚠ ${esc(r.error||'tool failed')}</div>`;
+    }
+    else if(m.role==='_sys') html+=`<div class="chat-msg sys">${esc(m.content)}</div>`;
+  }
+  if(AI.busy) html+=`<div class="chat-msg ai" style="color:var(--muted)">…</div>`;
+  el.innerHTML=html;
+  el.scrollTop=el.scrollHeight;
+  const send=document.getElementById('chat-send');
+  if(send) send.disabled=AI.busy;
+}
+
+function openAISettingsModal(){
+  openModal(`<h2>✨ Assistant Setup</h2>
+    <form autocomplete="off">
+      <div class="fg"><label>OpenAI API key</label>
+        <input type="password" name="key" value="${esc(aiKey())}" placeholder="sk-..." autocomplete="off"></div>
+      <div class="fg"><label>Model</label>
+        <input type="text" name="model" value="${esc(aiModel())}"></div>
+      <div class="note">The key is stored only in this browser and sent directly from your device to api.openai.com. Get one at platform.openai.com → API keys.</div>
+      <div class="mactions">
+        <button type="button" class="btn btn-cancel">Cancel</button>
+        <button type="submit" class="btn pri">Save</button>
+      </div>
+    </form>`,
+    form=>{
+      const d=new FormData(form);
+      LS.set(lk('ai_key'),String(d.get('key')||'').trim());
+      LS.set(lk('ai_model'),String(d.get('model')||'').trim()||'gpt-5-mini');
+      closeModal();
+      if(aiKey()) openAIModal();
+    });
+}
+
+function openAIModal(){
+  if(!aiKey()){ openAISettingsModal(); return; }
+  openModal(`<h2 style="display:flex;align-items:center;gap:8px;margin-bottom:12px">✨ Assistant
+      <span style="margin-left:auto;display:flex;gap:6px">
+        <button type="button" class="btn btn-sm" id="btn-ai-new">New Chat</button>
+        <button type="button" class="btn btn-sm" id="btn-ai-cfg" title="API key & model">⚙</button>
+      </span></h2>
+    <div class="chat-log" id="chat-log"></div>
+    <form class="chat-input-row" autocomplete="off">
+      <input type="text" id="chat-inp" placeholder="e.g. add a bowl of chili as a temp food" autocomplete="off">
+      <button type="submit" class="btn pri" id="chat-send">Send</button>
+    </form>
+    <div class="mactions"><button type="button" class="btn btn-cancel">Close</button></div>`,
+    ()=>{
+      const inp=document.getElementById('chat-inp');
+      const text=inp.value.trim();
+      if(!text||AI.busy) return;
+      inp.value='';
+      aiSend(text);
+    });
+  document.getElementById('btn-ai-new').addEventListener('click',()=>{if(!AI.busy){AI.msgs=[];renderChatLog();}});
+  document.getElementById('btn-ai-cfg').addEventListener('click',()=>{closeModal();openAISettingsModal();});
+  renderChatLog();
+  document.getElementById('chat-inp').focus();
+}
+
+// ═══════════════════════════════════════════════
 //  EVENT LISTENERS
 // ═══════════════════════════════════════════════
 document.getElementById('btn-add').addEventListener('click', openAddModal);
+document.getElementById('btn-ai').addEventListener('click', openAIModal);
 document.getElementById('btn-ex-presets').addEventListener('click', showPresetPicker);
 document.getElementById('btn-library').addEventListener('click', openLibraryModal);
 document.getElementById('btn-settings').addEventListener('click', openSettings);
