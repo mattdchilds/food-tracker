@@ -594,7 +594,7 @@ const IDB = {
 let _libFileHandle = null;
 const HAS_FSA = typeof window !== 'undefined' && !!window.showOpenFilePicker;
 
-function showLibBanner(mode, handle){
+function showLibBanner(mode, handle, action){
   const el=document.getElementById('lib-banner');
   if(mode==='unlinked'){
     el.className='lib-banner';
@@ -606,14 +606,21 @@ function showLibBanner(mode, handle){
     document.getElementById('lbtn-new').addEventListener('click',newLibFile);
     document.getElementById('lbtn-dismiss').addEventListener('click',()=>{LS.set(lk('lib_dismissed'),true);el.className='hidden';});
   } else if(mode==='reauth'){
+    // action:'load' = startup (file is source of truth); 'save' = mid-session
+    // (in-memory state is newer than the file — write, don't load)
+    action=action||'load';
     el.className='lib-banner warn';
-    el.innerHTML='🔒 Re-authorize library file to load your saved food data. &nbsp;'+
+    el.innerHTML='🔒 Re-authorize library file to '+(action==='save'?'keep your backup up to date':'load your saved food data')+'. &nbsp;'+
       '<button class="btn btn-sm pri" id="lbtn-reauth">Re-authorize</button> '+
       '<button class="btn btn-sm" id="lbtn-unlink-b">Unlink File</button>';
     document.getElementById('lbtn-reauth').addEventListener('click',async()=>{
       try{
         const perm=await handle.requestPermission({mode:'readwrite'});
-        if(perm==='granted'){_libFileHandle=handle;el.className='hidden';await loadLibraryFromFile();render();if(!precompIsValid()&&!_computing)startPrecompute();}
+        if(perm==='granted'){
+          _libFileHandle=handle;el.className='hidden';
+          if(action==='save'){await writeLibraryFile();}
+          else{await loadLibraryFromFile();render();if(!precompIsValid()&&!_computing)startPrecompute();}
+        }
       }catch(e){}
     });
     document.getElementById('lbtn-unlink-b').addEventListener('click',()=>unlinkLibFile());
@@ -674,7 +681,7 @@ async function pickLibFile(){
     await IDB.set('libFileHandle',handle);
     const data=await readLibFile(handle);
     if(data) applyLibrary(data);
-    await saveLibraryToFile();
+    await writeLibraryFile();
     document.getElementById('lib-banner').className='hidden';
     LS.set(lk('lib_dismissed'),false);
     saveState(); render();
@@ -687,7 +694,7 @@ async function newLibFile(){
     const handle=await window.showSaveFilePicker({types:[{description:'Food Library',accept:{'application/json':['.json']}}],suggestedName:'food-library.json'});
     _libFileHandle=handle;
     await IDB.set('libFileHandle',handle);
-    await saveLibraryToFile();
+    await writeLibraryFile();
     document.getElementById('lib-banner').className='hidden';
     LS.set(lk('lib_dismissed'),false);
   }catch(e){if(e.name!=='AbortError')console.error(e);}
@@ -724,9 +731,27 @@ function applyLibrary(data){
   if(Array.isArray(data.categories)) S.categories=data.categories;
 }
 
-async function saveLibraryToFile(){
+let _libSaveTimer=null;
+function saveLibraryToFile(){
+  if(!_libFileHandle) return;
+  clearTimeout(_libSaveTimer);
+  _libSaveTimer=setTimeout(()=>{_libSaveTimer=null;writeLibraryFile();},1000);
+}
+// Flush a pending debounced save when the app is backgrounded/closed, so the
+// file never lags behind localStorage across sessions.
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='hidden'&&_libSaveTimer){
+    clearTimeout(_libSaveTimer);_libSaveTimer=null;writeLibraryFile();
+  }
+});
+async function writeLibraryFile(){
   if(!_libFileHandle) return;
   try{
+    // Background saves must never trigger a permission prompt (mobile Chrome
+    // doesn't persist the grant and would re-prompt on every write) — if not
+    // granted, show the reauth banner and let the user grant via a gesture.
+    const perm=await _libFileHandle.queryPermission({mode:'readwrite'});
+    if(perm!=='granted'){showLibBanner('reauth',_libFileHandle,'save');return;}
     const lib={version:1,goals:S.goals,overrides:S.overrides,custom:S.custom,exercisePresets:S.exercisePresets,categories:S.categories};
     const w=await _libFileHandle.createWritable();
     await w.write(JSON.stringify(lib,null,2));
