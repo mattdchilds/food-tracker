@@ -43,6 +43,14 @@ button,.card,.preset-chip,.cmp-card{touch-action:manipulation}
 .goals-badge{display:none;align-items:center;gap:4px;background:var(--ok-lt);color:var(--ok);border-radius:20px;padding:3px 12px;font-size:12px;font-weight:700}
 .relax-score{display:inline-flex;align-items:center;gap:4px;background:var(--ok-lt);color:var(--ok);border-radius:20px;padding:3px 12px;font-size:12px;font-weight:700;margin-left:auto;cursor:default}
 .relax-score.bad{background:var(--warn-lt);color:var(--warn)}
+.week-strip{display:flex;align-items:center;gap:10px;padding:6px 20px;font-size:12px;font-weight:600;color:var(--muted);background:var(--surface);border-bottom:1px solid var(--border);flex-wrap:wrap}
+.week-strip b{color:var(--text)}
+.week-strip .over{color:var(--bad)}
+.week-strip .over b{color:var(--bad)}
+.week-dots{display:inline-flex;gap:4px;align-items:center}
+.week-dot{width:10px;height:10px;border-radius:50%;background:var(--border)}
+.week-dot.q{background:var(--ok)}
+.week-dot.t{background:var(--primary)}
 .preset-chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;min-height:32px}
 .preset-chip{display:inline-flex;align-items:center;gap:6px;background:var(--bg);border:1.5px solid var(--primary);border-radius:20px;padding:7px 14px;font-size:13px;cursor:pointer;transition:background .15s,color .15s;color:var(--text)}
 .preset-chip:hover{background:var(--primary);color:#fff}
@@ -209,6 +217,7 @@ select:disabled{opacity:.6;cursor:not-allowed}
 <div id="lib-banner" class="hidden"></div>
 <div id="tracking-banner" class="tracking-mode-banner"></div>
 <div id="relax-banner" class="relax-banner"></div>
+<div id="week-strip" class="week-strip"></div>
 <div id="recompute-banner" class="hidden"></div>
 
 <div id="sort-row">
@@ -278,6 +287,10 @@ const DEF_GOALS = [
   {id:'pro',    name:'Protein',      unit:'g',   type:'min',       threshold:80,            default:0,   builtin:true},
   {id:'health', name:'Health Score', unit:'',    type:'avg_min',   threshold:0.6,           default:0.5, builtin:true},
   {id:'meals',  name:'Meals',        unit:'',    type:'count_min', threshold:2,             default:0,   builtin:true, targetCategory:'meals'},
+  // weekly:true → threshold is a WEEKLY budget; today's effective cap is what
+  // remains after the trailing qualifying days' spend (see baseThr). Ships
+  // disabled so the plan solver ignores it until per-food costs are entered.
+  {id:'cost',   name:'Cost',         unit:'$',   type:'max',       threshold:70,            default:0,   builtin:true, weekly:true, enabled:false},
 ];
 const DEF_EXERCISE_PRESETS = [
   {id:'ep-walk30',     name:'Walk (30 min)',     cal:150},
@@ -571,7 +584,9 @@ const LS = {
 };
 const PFX = 'mpv7_';
 function lk(k){return PFX+k;}
-function todayKey(){return lk('day_'+new Date().toISOString().slice(0,10));}
+function todayStr(){return new Date().toISOString().slice(0,10);}
+function dateStrDaysAgo(n){return new Date(Date.now()-n*864e5).toISOString().slice(0,10);}
+function todayKey(){return lk('day_'+todayStr());}
 
 // ═══════════════════════════════════════════════
 //  INDEXEDDB  (stores file handle across sessions)
@@ -798,10 +813,14 @@ function loadState(){
   S.tempGoals    = day.tempGoals    || {};
   S.relaxScore   = day.relaxScore   || 0;
   S.temp         = Array.isArray(day.temp) ? day.temp : [];
+  HIST = LS.get(lk('hist'), {}) || {};
+  _histDay = null; _trailCache = null;
+  ensureHistory();   // finalize any past day keys into HIST
   loadPrecomp();
 }
 
 function saveState(){
+  _trailCache = null; // library/goal edits can re-price past days
   // Always keep localStorage in sync as a fast backup
   LS.set(lk('goals'),      S.goals);
   LS.set(lk('overrides'),  S.overrides);
@@ -972,6 +991,157 @@ function allGoalsMet(sums, avgs){
     }
   }
   return true;
+}
+
+// ═══════════════════════════════════════════════
+//  WEEKLY HISTORY  (7-day qualifying window)
+// ═══════════════════════════════════════════════
+// HIST: date('YYYY-MM-DD') → {servings, temp, exCals, relaxScore, completionPct}.
+// Device-local (like day states). Spend is recomputed live from the current
+// library so cost edits apply retroactively; foods deleted later are skipped.
+let HIST = {};
+const QUALIFY_PCT = 0.9;    // a day "counts" when tracked to ≥90% of its goals
+const HIST_LOOKBACK = 30;   // max days the window searches back
+const HIST_KEEP = 60;       // records older than this are pruned
+
+let _histDay = null;
+function ensureHistory(){
+  const d = todayStr();
+  if(_histDay === d) return;
+  _histDay = d;
+  finalizeHistory();
+}
+
+// Turn every past mpv7_day_* key not yet in HIST into a finalized record.
+// completionPct is frozen at finalization; raw servings/temp are kept so
+// weekly budgets can re-price the day against the current library.
+function finalizeHistory(){
+  const today = todayStr();
+  const re = new RegExp('^'+PFX+'day_(\\d{4}-\\d{2}-\\d{2})$');
+  let changed = false;
+  const keys = [];
+  try{ for(let i=0;i<localStorage.length;i++) keys.push(localStorage.key(i)); }catch{}
+  for(const k of keys){
+    const m = k && k.match(re);
+    if(!m) continue;
+    const date = m[1];
+    if(date >= today || HIST[date]) continue;
+    const day = LS.get(k, null);
+    if(!day || typeof day !== 'object') continue;
+    HIST[date] = {
+      servings: day.servings || {},
+      temp: Array.isArray(day.temp) ? day.temp : [],
+      exCals: day.exCals || 0,
+      relaxScore: day.relaxScore || 0,
+      completionPct: completionPctFor(day),
+    };
+    changed = true;
+  }
+  const cutoff = dateStrDaysAgo(HIST_KEEP);
+  for(const d of Object.keys(HIST)) if(d < cutoff){ delete HIST[d]; changed = true; }
+  if(changed){ _trailCache = null; LS.set(lk('hist'), HIST); }
+}
+
+// id→food map for pricing a historical day: current library (archived foods
+// still count — they were real when eaten) plus that day's temp foods.
+function histFoodMap(temp){
+  const map = {};
+  for(const f of allFoods({includeArchived:true})) map[f.id] = f;
+  for(const f of (temp||[])) if(f && f.id) map[f.id] = f;
+  return map;
+}
+
+// How completely a day was tracked: mean per-goal completion (0..1) across the
+// currently-enabled daily goals, judged against the goals as the app showed
+// them that day (tempGoals relaxations included — a fully tracked day with
+// relaxed goals still qualifies; the relaxScore chip keeps that honest).
+// weekly-budget goals are excluded: an expensive day is still a tracked day,
+// and dropping it from the window would erase its spend from the budget.
+function completionPctFor(day){
+  const tempGoals = day.tempGoals || {};
+  const goals = S.goals.filter(g=>g.enabled!==false && !g.weekly);
+  if(!goals.length) return 0;
+  const foods = histFoodMap(day.temp);
+  let rawCal = 0;
+  const sums = {}, hw = {};
+  for(const g of goals){ sums[g.id]=0; hw[g.id]=0; }
+  for(const [id,s] of Object.entries(day.servings||{})){
+    if(!s) continue;
+    const f = foods[id]; if(!f) continue;
+    rawCal += f.cal*s;
+    for(const g of goals){
+      if(g.id==='cal') continue;
+      if(g.type==='count_min'){ sums[g.id] += foodCountsForGoal(f,g)*s; continue; }
+      const m = getMetric(f,g);
+      sums[g.id] += m*s;
+      if(g.type==='avg_min'||g.type==='avg_max') hw[g.id] += m*f.cal*s;
+    }
+  }
+  const netCal = rawCal - (day.exCals||0);
+  let tot = 0;
+  for(const g of goals){
+    const tv = tempGoals[g.id];
+    let c;
+    if(g.type==='range'){
+      const goal = (tv!==undefined?tv:g.goal) || 1;
+      c = netCal<=0 ? 0 : Math.min(netCal,goal)/Math.max(netCal,goal);
+    } else {
+      const thr = tv!==undefined?tv:g.threshold;
+      const isAvg = g.type==='avg_min'||g.type==='avg_max';
+      const v = isAvg ? (rawCal>0?hw[g.id]/rawCal:0) : (sums[g.id]||0);
+      if(g.type==='max'||g.type==='avg_max') c = v<=thr ? 1 : (v>0?thr/v:1);
+      else c = thr<=0 ? 1 : Math.min(1, v/thr);
+    }
+    tot += c;
+  }
+  return Math.round(tot/goals.length*1000)/1000;
+}
+
+// Dates in the current window, newest first: today plus the most recent
+// qualifying past days (non-qualifying days are skipped, so the window
+// reaches back farther), up to 7 total. Lookback capped at HIST_LOOKBACK
+// days and never crosses the last "Reset week" marker.
+function weekWindowDates(){
+  const reset = LS.get(lk('week_reset'), '');
+  const dates = [todayStr()];
+  for(let i=1; i<=HIST_LOOKBACK && dates.length<7; i++){
+    const d = dateStrDaysAgo(i);
+    if(reset && d < reset) break;
+    const rec = HIST[d];
+    if(rec && rec.completionPct >= QUALIFY_PCT) dates.push(d);
+  }
+  return dates;
+}
+
+function histSpend(rec, g){
+  const foods = histFoodMap(rec.temp);
+  let sum = 0;
+  for(const [id,s] of Object.entries(rec.servings||{})){
+    if(!s) continue;
+    const f = foods[id]; if(!f) continue;
+    sum += getMetric(f,g)*s;
+  }
+  return sum;
+}
+
+// Metric spend over the window's PAST days (today's own sum counts against the
+// remaining budget through the normal daily goal machinery). Memoized because
+// effThr/effGoals sit on hot paths (precompHash runs every render); cleared in
+// saveState() and whenever history changes.
+let _trailCache = null; // {day, byGoal:{goalId:spend}}
+function trailingSpend(g){
+  ensureHistory();
+  const day = todayStr();
+  if(!_trailCache || _trailCache.day !== day) _trailCache = {day, byGoal:{}};
+  if(_trailCache.byGoal[g.id] === undefined){
+    let sum = 0;
+    for(const d of weekWindowDates()){
+      if(d === day) continue;
+      if(HIST[d]) sum += histSpend(HIST[d], g);
+    }
+    _trailCache.byGoal[g.id] = Math.round(sum*100)/100;
+  }
+  return _trailCache.byGoal[g.id];
 }
 
 // ═══════════════════════════════════════════════
@@ -1413,14 +1583,54 @@ function foodStatsHtml(f, {names=false, ppcRange=null}={}){
 //  RENDER
 // ═══════════════════════════════════════════════
 function render(){
+  ensureHistory(); // catches midnight rollover while the app stays open
   const st = computeStats();
   const feas = computeFeasibility();
   renderTrackingBanner();
   renderRelaxBanner();
   renderBanner(st);
   renderStats(st);
+  renderWeekStrip(st);
   renderGrids(feas);
   renderEaten();
+}
+
+// ── Week strip: qualifying-day dots + weekly budgets ──
+function renderWeekStrip(st){
+  const el=document.getElementById('week-strip');
+  const today=todayStr();
+  const dates=weekWindowDates(); // newest first, includes today
+  const past=dates.length-1;
+  let dots='';
+  for(let i=dates.length;i<7;i++) dots+='<span class="week-dot" title="No qualifying day yet"></span>';
+  for(let i=dates.length-1;i>=0;i--){
+    const d=dates[i];
+    dots+=d===today
+      ?'<span class="week-dot t" title="Today (in progress)"></span>'
+      :`<span class="week-dot q" title="${d} — tracked to ${Math.round((HIST[d]?.completionPct||0)*100)}%"></span>`;
+  }
+  let budgets='';
+  for(const g of S.goals){
+    if(!g.weekly||g.enabled===false) continue;
+    const spent=trailingSpend(g)+(st.sums[g.id]||0);
+    const over=spent>g.threshold;
+    budgets+=`<span${over?' class="over"':''} title="Spend across the window's tracked days plus today">💰 <b>${fmtVal(spent,g)}</b> / ${fmtVal(g.threshold,g)}${g.unit?' '+g.unit:''} this week</span>`;
+  }
+  el.innerHTML=`<span title="Days tracked to ≥${Math.round(QUALIFY_PCT*100)}% of goals count toward the week; untracked days are skipped">📅 Week</span>
+    <span class="week-dots">${dots}</span>
+    <span>${past} tracked day${past===1?'':'s'} + today</span>
+    ${budgets}
+    <button class="btn btn-sm" id="btn-reset-week" style="margin-left:auto" title="Start the weekly window fresh from today">⟳ Reset week</button>`;
+  document.getElementById('btn-reset-week').addEventListener('click',resetWeek);
+}
+
+function resetWeek(){
+  if(!confirm('Reset the weekly window? Days before today will no longer count toward weekly budgets.')) return;
+  LS.set(lk('week_reset'),todayStr());
+  _trailCache=null;
+  cancelPrecomp();      // weekly thresholds may have changed → stale plans
+  startIncFeasCompute();
+  saveState(); render();
 }
 
 function renderTrackingBanner(){
@@ -1440,7 +1650,7 @@ function renderRelaxBanner(){
   if(!ids.length){el.className='relax-banner';return;}
   const parts=ids.map(gid=>{
     const g=S.goals.find(x=>x.id===gid); if(!g) return '';
-    const orig=g.type==='range'?g.goal:g.threshold;
+    const orig=g.type==='range'?g.goal:baseThr(g); // weekly: show today's cap, not the weekly budget
     return `${esc(g.name)} ${fmtVal(S.tempGoals[gid],g)} (was ${fmtVal(orig,g)})`;
   }).filter(Boolean).join(' · ');
   el.className='relax-banner show';
@@ -1482,12 +1692,19 @@ function renderBanner(st){
 }
 
 function fmtVal(v, g){
+  if(g.unit==='$') return (Math.round(v*100)/100).toFixed(2);
   if(g.type==='avg_min'||g.type==='avg_max') return v.toFixed(2);
   const r=Math.round(v*10)/10;
   return r%1===0 ? String(r|0) : r.toFixed(1);
 }
 
-function effThr(g){ return (S.tempGoals&&S.tempGoals[g.id]!==undefined) ? S.tempGoals[g.id] : g.threshold; }
+// Base (pre-relaxation) threshold. Weekly goals: today's cap is whatever is
+// left of the weekly budget after the trailing qualifying days' spend.
+function baseThr(g){
+  if(!g.weekly) return g.threshold;
+  return Math.max(0, Math.round((g.threshold - trailingSpend(g))*100)/100);
+}
+function effThr(g){ return (S.tempGoals&&S.tempGoals[g.id]!==undefined) ? S.tempGoals[g.id] : baseThr(g); }
 function effGoalCal(g){ return (S.tempGoals&&S.tempGoals[g.id]!==undefined) ? S.tempGoals[g.id] : g.goal; }
 // Goals with today's temp relaxations baked in — feed these to the solver so
 // feasibility honors relaxed values (raw S.goals stay untouched in settings).
@@ -1498,8 +1715,9 @@ function effGoalCal(g){ return (S.tempGoals&&S.tempGoals[g.id]!==undefined) ? S.
 function effGoals(){
   return S.goals.filter(g=>g.enabled!==false).map(g=>{
     const tv=S.tempGoals?S.tempGoals[g.id]:undefined;
-    if(tv===undefined) return g;
-    return g.type==='range' ? {...g,goal:tv} : {...g,threshold:tv};
+    if(tv!==undefined) return g.type==='range' ? {...g,goal:tv} : {...g,threshold:tv};
+    if(g.weekly) return {...g, threshold:baseThr(g)}; // bake remaining budget in
+    return g;
   });
 }
 
@@ -1548,8 +1766,9 @@ function renderStats(st){
       const pctFill=Math.min(100,thr>0?val/thr*100:0).toFixed(1)+'%';
       const color=progressColor(val,thr,g.type==='max'||g.type==='avg_max');
       const dirLabel=(g.type==='max'||g.type==='avg_max')?'≤':'≥';
+      const wkNote=g.weekly?` <small style="color:var(--muted);text-transform:none" title="Today's cap: what's left of the ${fmtVal(g.threshold,g)}${unit}/week budget">(of ${fmtVal(g.threshold,g)}${unit}/wk)</small>`:'';
       html+=`<div class="stat">
-        <div class="stat-lbl"><span>${goalLabel(g)}</span><span>${fmtVal(val,g)}${unit} / ${dirLabel}${thr}${unit}</span></div>
+        <div class="stat-lbl"><span>${goalLabel(g)}${wkNote}</span><span>${fmtVal(val,g)}${unit} / ${dirLabel}${fmtVal(thr,g)}${unit}</span></div>
         <div class="pbar"><div class="pbar-fill ${color}" style="width:${pctFill}"></div></div>
       </div>`;
     }
@@ -1848,7 +2067,7 @@ function openSettings(){
       const catName=g.targetCategory?getCategoryName(g.targetCategory):'Meals (flag)';
       params=`≥ ${g.threshold} · tab: ${catName}`;
     } else if(g.type==='min'||g.type==='avg_min') params=`≥ ${g.threshold}${g.unit?' '+g.unit:''}`;
-    else params=`≤ ${g.threshold}${g.unit?' '+g.unit:''}`;
+    else params=`≤ ${g.threshold}${g.unit?' '+g.unit:''}${g.weekly?' per week':''}`;
     const off=g.enabled===false;
     // 'cal' has no toggle: the solver can't run without a calorie window
     const toggle=g.id==='cal'
@@ -1979,7 +2198,9 @@ function openGoalEditModal(existing, onSave){
           </select>
         </div>`;
     } else {
-      const lbl={min:'Minimum',max:'Maximum',avg_min:'Minimum average',avg_max:'Maximum average'}[type]||'Threshold';
+      const lbl=g.weekly
+        ?`Weekly budget${g.unit?' ('+g.unit+')':''} <small style="color:var(--muted)">— spread over the rolling 7-day window</small>`
+        :({min:'Minimum',max:'Maximum',avg_min:'Minimum average',avg_max:'Maximum average'}[type]||'Threshold');
       el.innerHTML=`<div class="fg"><label>${lbl}</label><input type="number" name="gparam1" value="${g.threshold??0}" step="any" required></div>`;
     }
   }
@@ -2506,11 +2727,13 @@ function aiModel(){ return LS.get(lk('ai_model'),'gpt-5-mini'); }
 
 function aiSystemPrompt(){
   const goalLines=S.goals.map(g=>{
-    if(g.type==='range') return `- ${g.name} (id "${g.id}"): target ${effGoalCal(g)} ± ${g.range}${g.unit?' '+g.unit:''}`;
+    const off=g.enabled===false?' [goal currently disabled — still record this metric on new foods]':'';
+    if(g.type==='range') return `- ${g.name} (id "${g.id}"): target ${effGoalCal(g)} ± ${g.range}${g.unit?' '+g.unit:''}${off}`;
+    if(g.weekly) return `- ${g.name} (id "${g.id}"): weekly budget ${g.threshold}${g.unit?' '+g.unit:''} over a rolling 7-tracked-day window; ${fmtVal(effThr(g),g)}${g.unit?' '+g.unit:''} left for today${off}`;
     const dir=(g.type==='max'||g.type==='avg_max')?'at most':'at least';
     const kind=(g.type==='avg_min'||g.type==='avg_max')?'calorie-weighted average ':'';
     const cnt=g.type==='count_min'?' (count of qualifying foods eaten)':'';
-    return `- ${g.name} (id "${g.id}"): ${kind}${dir} ${effThr(g)}${g.unit?' '+g.unit:''}${cnt}`;
+    return `- ${g.name} (id "${g.id}"): ${kind}${dir} ${effThr(g)}${g.unit?' '+g.unit:''}${cnt}${off}`;
   }).join('\n');
 
   const metricGoals=S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min');
