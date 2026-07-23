@@ -2224,6 +2224,122 @@ function enterTrackingMode(){
   saveState();
 }
 
+// ── Joint-conflict relax search ───────────────
+// When no single per-goal bound fails (relaxNeededFor returns empty changes)
+// the exact solver still says the food doesn't fit: the goals conflict in
+// combination. Rather than punting to free tracking, probe the exact solver
+// with progressively larger uniform relaxations of every non-cal goal until
+// the food becomes feasible, then shrink the winning set: restore goals that
+// weren't needed, and step the survivors back one rung. Each probe costs one
+// worker run (same work as the recompute after any tap), so the whole search
+// finishes while the dialog is open.
+const RELAX_LADDER=[0.08,0.15,0.25,0.4,0.6,1];
+let _relaxWorker=null, _relaxResolve=null, _relaxSearchTok=null;
+
+function cancelRelaxSearch(){
+  _relaxSearchTok=null;
+  if(_relaxWorker){_relaxWorker.terminate();_relaxWorker=null;}
+  if(_relaxResolve){const r=_relaxResolve;_relaxResolve=null;r(null);}
+}
+
+// One goal's threshold relaxed by fraction lam in its slack direction.
+function relaxGoalVal(g, lam){
+  const t=g.threshold;
+  if(g.type==='max'||g.type==='avg_max'||g.type==='variety_max'){
+    // Additive fallback when the cap is already 0 (e.g. weekly budget spent)
+    let v=t>0 ? t*(1+lam) : (g.type==='avg_max'?lam:lam*10);
+    v=(g.type==='avg_max') ? Math.ceil(v*100)/100 : Math.ceil(v);
+    return g.type==='variety_max' ? Math.min(100,v) : v;
+  }
+  let v=t*(1-lam);
+  v=(g.type==='avg_min') ? Math.floor(v*100)/100 : Math.floor(v);
+  return Math.max(0,v);
+}
+
+function goalsWithChanges(base, changes){
+  return base.map(g=>changes[g.id]===undefined ? g
+    : g.type==='range' ? {...g,goal:changes[g.id]} : {...g,threshold:changes[g.id]});
+}
+
+// Exact feasibility of adding one serving of foodId under a candidate goal
+// set, via a dedicated worker (doesn't disturb the precomp/incremental ones).
+function exactFeasWithGoals(goals, foodId){
+  return new Promise(resolve=>{
+    _relaxResolve=resolve;
+    _relaxWorker=spawnWorker(
+      ev=>{ _relaxWorker=null; if(_relaxResolve===resolve){_relaxResolve=null; resolve(ev.data.feasMap[foodId]!==false);} },
+      err=>{ console.error('Relax search worker error:',err); _relaxWorker=null; if(_relaxResolve===resolve){_relaxResolve=null; resolve(null);} }
+    );
+    _relaxWorker.postMessage({
+      foods: allFoods().map(f=>({...f,_cat:getFoodCategory(f),_vt:vtagsOf(f)})),
+      goals,
+      exCals: S.exCals,
+      currentServings: S.servings,
+      excludedIds: Object.keys(S.excluded),
+      variety: varietyWorkerCtx(goals)
+    });
+  });
+}
+
+// Returns {changes,deg} like relaxNeededFor, or null if even relaxing every
+// non-cal goal to nothing doesn't make the food fit (or the search was
+// cancelled). tok must stay === _relaxSearchTok for the search to continue.
+async function searchJointRelax(f, tok, onTick){
+  const base=effGoals();
+  const cands=base.filter(g=>g.id!=='cal'&&g.type!=='range');
+  if(!cands.length) return null;
+  let runs=0;
+  const feas=async ch=>{
+    runs++; if(onTick) onTick(runs);
+    const ok=await exactFeasWithGoals(goalsWithChanges(base,ch), f.id);
+    return _relaxSearchTok===tok ? ok : null;
+  };
+
+  // Phase 1: smallest uniform rung that makes f feasible
+  let lamIdx=-1, changes=null;
+  for(let i=0;i<RELAX_LADDER.length;i++){
+    const ch={};
+    for(const g of cands){ const v=relaxGoalVal(g,RELAX_LADDER[i]); if(v!==g.threshold) ch[g.id]=v; }
+    if(!Object.keys(ch).length) continue;
+    const ok=await feas(ch);
+    if(ok===null) return null;
+    if(ok){ lamIdx=i; changes=ch; break; }
+  }
+  if(!changes) return null;
+
+  const relDelta=gid=>{
+    const g=cands.find(x=>x.id===gid);
+    const unit=(g.type==='avg_min'||g.type==='avg_max')?.01:1;
+    return Math.abs(changes[gid]-g.threshold)/Math.max(unit,Math.abs(g.threshold));
+  };
+
+  // Phase 2: restore goals that weren't actually needed, biggest bump first
+  for(const gid of Object.keys(changes).sort((a,b)=>relDelta(b)-relDelta(a))){
+    if(Object.keys(changes).length<=1) break;
+    const trial={...changes}; delete trial[gid];
+    const ok=await feas(trial);
+    if(ok===null) return null;
+    if(ok) changes=trial;
+  }
+
+  // Phase 3: step each surviving goal back one rung if it stays feasible
+  if(lamIdx>0){
+    for(const gid of Object.keys(changes)){
+      const g=cands.find(x=>x.id===gid);
+      const v=relaxGoalVal(g,RELAX_LADDER[lamIdx-1]);
+      if(v===changes[gid]||v===g.threshold) continue;
+      const trial={...changes,[gid]:v};
+      const ok=await feas(trial);
+      if(ok===null) return null;
+      if(ok) changes=trial;
+    }
+  }
+
+  let deg=0;
+  for(const gid of Object.keys(changes)) deg=Math.max(deg,relDelta(gid));
+  return {changes,deg};
+}
+
 // ── Degrees-of-failure dialog ─────────────────
 function describeRelaxChange(g, nv){
   const unit=g.unit?` ${g.unit}`:'';
@@ -2239,28 +2355,59 @@ function openRelaxDialog(f, info){
   const entries=Object.entries(info.changes)
     .map(([gid,nv])=>[S.goals.find(g=>g.id===gid),nv])
     .filter(([g])=>g);
-  const rows=entries.map(([g,nv])=>`<li>${describeRelaxChange(g,nv)}</li>`).join('');
+  const rowsFor=ch=>Object.entries(ch)
+    .map(([gid,nv])=>[S.goals.find(g=>g.id===gid),nv])
+    .filter(([g])=>g)
+    .map(([g,nv])=>`<li>${describeRelaxChange(g,nv)}</li>`).join('');
   const body=entries.length
     ? `<p style="margin-bottom:8px"><b>${esc(f.name)}</b> doesn't fit today's plan. Relax these goals for today only?</p>
-       <ul style="margin:0 0 14px 18px;font-size:13px;line-height:1.8">${rows}</ul>`
-    : `<p style="margin-bottom:14px"><b>${esc(f.name)}</b> doesn't fit today's plan — the goals conflict in combination rather than one number being off. You can still add it by switching to free tracking.</p>`;
+       <ul style="margin:0 0 14px 18px;font-size:13px;line-height:1.8">${rowsFor(info.changes)}</ul>`
+    : `<p style="margin-bottom:8px"><b>${esc(f.name)}</b> doesn't fit today's plan — the goals conflict in combination rather than one number being off.</p>
+       <p id="relax-joint" style="margin-bottom:14px;font-size:13px;opacity:.75">⏳ Searching for the smallest combination of goals to relax…</p>`;
   openModal(`<h2>🔓 Doesn't fit the plan</h2>${body}
-    <div class="mactions">
+    <div class="mactions" id="relax-actions">
       ${entries.length?`<button type="button" class="btn pri" id="btn-relax-add">Relax goals & add</button>`:''}
       <button type="button" class="btn" id="btn-track-add">Track freely</button>
       <button type="button" class="btn btn-cancel">Cancel</button>
     </div>`);
-  document.getElementById('btn-relax-add')?.addEventListener('click',()=>{
+  const applyRelax=changes=>{
     closeModal();
-    S.tempGoals=Object.assign({},S.tempGoals,info.changes);
-    S.relaxScore=(S.relaxScore||0)+Object.keys(info.changes).length;
+    S.tempGoals=Object.assign({},S.tempGoals,changes);
+    S.relaxScore=(S.relaxScore||0)+Object.keys(changes).length;
     forceAddServing(f.id);
-  });
+  };
+  document.getElementById('btn-relax-add')?.addEventListener('click',()=>applyRelax(info.changes));
   document.getElementById('btn-track-add').addEventListener('click',()=>{
     closeModal();
     enterTrackingMode();
     forceAddServing(f.id);
   });
+  if(!entries.length){
+    cancelRelaxSearch();
+    const tok={}; _relaxSearchTok=tok;
+    searchJointRelax(f, tok, n=>{
+      const p=document.getElementById('relax-joint');
+      if(p&&_relaxSearchTok===tok) p.textContent=`⏳ Searching for the smallest combination of goals to relax… (${n} checked)`;
+    }).then(res=>{
+      if(_relaxSearchTok!==tok) return;
+      _relaxSearchTok=null;
+      const p=document.getElementById('relax-joint');
+      if(!p) return; // dialog replaced/closed meanwhile
+      if(!res||!Object.keys(res.changes).length){
+        p.textContent='Even relaxing every other goal doesn\'t make it fit — the calorie window itself can\'t be completed with it. You can still add it with free tracking.';
+        return;
+      }
+      const many=Object.keys(res.changes).length>1;
+      p.outerHTML=`<p style="margin-bottom:8px">${many?'Relaxing these goals together':'Relaxing this goal'} for today only would make it fit:</p>
+        <ul style="margin:0 0 14px 18px;font-size:13px;line-height:1.8">${rowsFor(res.changes)}</ul>`;
+      const btn=document.createElement('button');
+      btn.type='button'; btn.className='btn pri'; btn.id='btn-relax-add';
+      btn.textContent=many?'Relax goals & add':'Relax goal & add';
+      btn.addEventListener('click',()=>applyRelax(res.changes));
+      const acts=document.getElementById('relax-actions');
+      acts.insertBefore(btn,acts.firstChild);
+    });
+  }
 }
 
 // Bypasses addServing's _incComputing guard: the user explicitly confirmed this
@@ -2333,7 +2480,7 @@ function openModal(html, onSubmit){
   }
   box.querySelector('.btn-cancel')?.addEventListener('click',closeModal);
 }
-function closeModal(){document.getElementById('overlay').classList.add('h');}
+function closeModal(){document.getElementById('overlay').classList.add('h');cancelRelaxSearch();}
 document.getElementById('overlay').addEventListener('click',ev=>{
   if(ev.target===document.getElementById('overlay')) closeModal();
 });
