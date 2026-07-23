@@ -51,6 +51,9 @@ button,.card,.preset-chip,.cmp-card{touch-action:manipulation}
 .week-dot{width:10px;height:10px;border-radius:50%;background:var(--border)}
 .week-dot.q{background:var(--ok)}
 .week-dot.t{background:var(--primary)}
+.week-strip .ok{color:var(--ok)} .week-strip .ok b{color:var(--ok)}
+.wk-var{cursor:pointer}
+.rpt{font-size:10px;opacity:.65;margin-left:3px;cursor:default}
 .preset-chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;min-height:32px}
 .preset-chip{display:inline-flex;align-items:center;gap:6px;background:var(--bg);border:1.5px solid var(--primary);border-radius:20px;padding:7px 14px;font-size:13px;cursor:pointer;transition:background .15s,color .15s;color:var(--text)}
 .preset-chip:hover{background:var(--primary);color:#fff}
@@ -1144,6 +1147,60 @@ function trailingSpend(g){
   return _trailCache.byGoal[g.id];
 }
 
+// ── Variety: food-family tags over the weekly window ──
+// Each food carries 1–3 `vtags` (identity family + broader nutritional family,
+// e.g. pizza L/M both ["pizza"]; Huel ["shake","protein-supp","grains"]).
+// Untagged foods default to their name slug — every food its own family.
+// Guidance only: never fed to the solver.
+function slugTag(s){
+  return String(s||'').toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,24);
+}
+function parseVtags(raw){
+  return [...new Set(String(raw||'').split(',').map(slugTag).filter(Boolean))].slice(0,3);
+}
+function vtagsOf(f){
+  return (f.vtags&&f.vtags.length)?f.vtags:[slugTag(f.name)||'food'];
+}
+
+const DEF_VARIETY={minTags:8,topPct:25}; // ≥8 distinct families/week; no family >25% of servings
+function varietyCfg(){
+  const v=LS.get(lk('variety'),null);
+  return v&&typeof v==='object'?{...DEF_VARIETY,...v}:{...DEF_VARIETY};
+}
+
+// Servings per tag across the window (past qualifying days re-read from HIST,
+// today live). A multi-tag food counts toward each of its tags, but only once
+// toward the total — so no single tag can exceed 100% of servings.
+function varietyStats(){
+  const tagServings={}; let total=0;
+  const addDay=(servings,foods)=>{
+    for(const [id,s] of Object.entries(servings||{})){
+      if(!s) continue;
+      const f=foods[id]; if(!f) continue; // deleted since → skip, like histSpend
+      total+=s;
+      for(const t of vtagsOf(f)) tagServings[t]=(tagServings[t]||0)+s;
+    }
+  };
+  const today=todayStr();
+  for(const d of weekWindowDates()){
+    if(d===today) continue;
+    if(HIST[d]) addDay(HIST[d].servings,histFoodMap(HIST[d].temp));
+  }
+  addDay(S.servings,histFoodMap(S.temp));
+  let topTag='',topN=0;
+  for(const [t,n] of Object.entries(tagServings)) if(n>topN){topN=n;topTag=t;}
+  return {tagServings,total,distinct:Object.keys(tagServings).length,topTag,topShare:total>0?topN/total:0};
+}
+
+// Tags already at/over the repetition cap this week (min 3 servings so a
+// 2-of-6 early-week tag doesn't flag everything). Drives the 🔁 card badge.
+function repeatTagSet(vs,vc){
+  const set=new Set();
+  if(vs.total>0) for(const [t,n] of Object.entries(vs.tagServings))
+    if(n>=3&&n/vs.total>=vc.topPct/100) set.add(t);
+  return set;
+}
+
 // ═══════════════════════════════════════════════
 //  PRECOMPUTATION
 // ═══════════════════════════════════════════════
@@ -1616,12 +1673,45 @@ function renderWeekStrip(st){
     const over=spent>g.threshold;
     budgets+=`<span${over?' class="over"':''} title="Spend across the window's tracked days plus today">💰 <b>${fmtVal(spent,g)}</b> / ${fmtVal(g.threshold,g)}${g.unit?' '+g.unit:''} this week</span>`;
   }
+  const vs=varietyStats(), vc=varietyCfg();
+  const divOk=vs.distinct>=vc.minTags;
+  const topPct=Math.round(vs.topShare*100);
+  const topOver=vs.total>0&&topPct>vc.topPct;
+  const variety=`<span class="wk-var${divOk?' ok':''}" id="wk-var-div" title="Distinct food families eaten this week — aim for at least ${vc.minTags}. Click to edit variety targets.">🎨 <b>${vs.distinct}</b>/${vc.minTags} families</span>
+    <span class="wk-var${topOver?' over':(vs.total?' ok':'')}" id="wk-var-top" title="Biggest food family's share of the week's servings — keep it at or under ${vc.topPct}%. Click to edit variety targets.">🔁 ${vs.topTag?`${esc(vs.topTag)} <b>${topPct}%</b>`:'—'} (≤${vc.topPct}%)</span>`;
   el.innerHTML=`<span title="Days tracked to ≥${Math.round(QUALIFY_PCT*100)}% of goals count toward the week; untracked days are skipped">📅 Week</span>
     <span class="week-dots">${dots}</span>
     <span>${past} tracked day${past===1?'':'s'} + today</span>
     ${budgets}
+    ${variety}
     <button class="btn btn-sm" id="btn-reset-week" style="margin-left:auto" title="Start the weekly window fresh from today">⟳ Reset week</button>`;
   document.getElementById('btn-reset-week').addEventListener('click',resetWeek);
+  document.getElementById('wk-var-div')?.addEventListener('click',openVarietyModal);
+  document.getElementById('wk-var-top')?.addEventListener('click',openVarietyModal);
+}
+
+function openVarietyModal(){
+  const vc=varietyCfg();
+  openModal(`<h2>🎨 Variety Targets</h2>
+    <form>
+      <div class="fg"><label>Distinct food families per week <small style="color:var(--muted)">(at least)</small></label>
+        <input type="number" name="minTags" value="${vc.minTags}" min="1" max="50" step="1"></div>
+      <div class="fg"><label>Max share of one family <small style="color:var(--muted)">(% of the week's servings)</small></label>
+        <input type="number" name="topPct" value="${vc.topPct}" min="5" max="100" step="1"></div>
+      <div class="note">Guidance only — variety never constrains the plan. Untagged foods count as their own family; set tags in ✎ Edit Food → Variety tags, or ask the AI to "tag my library".</div>
+      <div class="mactions">
+        <button type="button" class="btn btn-cancel">Cancel</button>
+        <button type="submit" class="btn pri">Save</button>
+      </div>
+    </form>`,
+    form=>{
+      const d=new FormData(form);
+      LS.set(lk('variety'),{
+        minTags:Math.max(1,parseInt(d.get('minTags'))||DEF_VARIETY.minTags),
+        topPct:Math.min(100,Math.max(5,parseInt(d.get('topPct'))||DEF_VARIETY.topPct)),
+      });
+      closeModal(); render();
+    });
 }
 
 function resetWeek(){
@@ -1781,7 +1871,7 @@ function renderStats(st){
   rs.classList.toggle('bad',(S.relaxScore||0)>0);
 }
 
-function makeCard(f, feas, ppcRange, relaxCache){
+function makeCard(f, feas, ppcRange, relaxCache, repeatTags){
   const s=servingsOf(f.id);
   const isFeas=feas[f.id]!==false;
   const ms=maxServingsOf(f.id);
@@ -1807,10 +1897,13 @@ function makeCard(f, feas, ppcRange, relaxCache){
   const xTitle=xed?'Un-skip (allow again)':eaten?`No more of this today`:'Skip today';
   const xLabel=xed?'↺':'✕';
 
+  const rptTag=repeatTags&&vtagsOf(f).find(t=>repeatTags.has(t));
+  const rptHtml=rptTag?`<span class="rpt" title="'${esc(rptTag)}' is already ${Math.round(varietyCfg().topPct)}%+ of this week's servings — consider some variety">🔁</span>`:'';
+
   div.innerHTML=`
     <div class="hbar" style="background:${healthColor(getHealthMetric(f))}"></div>
     <div class="cbody">
-      <div class="cname">${f.name}</div>
+      <div class="cname">${f.name}${rptHtml}</div>
       <div class="cstats">${statsHtml}</div>
     </div>
     <div class="cfoot">
@@ -1857,6 +1950,7 @@ function renderGrids(feas){
   const foods=allFoods();
   const ppcRange=computePPCRange(foods);
   const relaxCache={}; // per-render memo of relaxNeededFor results
+  const repeatTags=repeatTagSet(varietyStats(),varietyCfg()); // 🔁 badge for over-repeated families
   const container=document.getElementById('main');
   container.innerHTML='';
   const sorted=sortFoods(foods);
@@ -1886,7 +1980,7 @@ function renderGrids(feas){
     grid.className='food-grid';
     grid.id='grid-'+cat.id;
     if(cat.collapsed) grid.style.display='none';
-    for(const f of catFoods) grid.appendChild(makeCard(f,feas,ppcRange,relaxCache));
+    for(const f of catFoods) grid.appendChild(makeCard(f,feas,ppcRange,relaxCache,repeatTags));
     sec.appendChild(grid);
     container.appendChild(sec);
   }
@@ -1900,7 +1994,7 @@ function renderGrids(feas){
     sec.appendChild(hdrDiv);
     const grid=document.createElement('div');
     grid.className='food-grid';
-    for(const f of orphans) grid.appendChild(makeCard(f,feas,ppcRange,relaxCache));
+    for(const f of orphans) grid.appendChild(makeCard(f,feas,ppcRange,relaxCache,repeatTags));
     sec.appendChild(grid);
     container.appendChild(sec);
   }
@@ -2262,6 +2356,8 @@ function openAddModal(){
         <input type="number" name="maxServings" value="2" min="1" max="10" step="1"></div>
       ${categoryPickerHtml(defCatId)}
       ${renderExtrasFields({})}
+      <div class="fg"><label>Variety tags <small style="color:var(--muted)">(1–3 food families, comma-separated)</small></label>
+        <input type="text" name="vtags" placeholder="e.g. pizza — blank = own family"></div>
       <div class="sep"></div>
       <div class="fg">
         <label class="tog-row" id="perm-tog-lbl"><div class="tog on" id="perm-tog"></div> Save Permanently</label>
@@ -2282,6 +2378,8 @@ function openAddModal(){
         category:catVal,
         extras:extrasFromForm(form),
       };
+      const vtNew=parseVtags(d.get('vtags'));
+      if(vtNew.length) newFood.vtags=vtNew;
       if(!newFood.name||newFood.cal<0) return;
       if(permOn) S.custom.push(newFood);
       else S.temp.push(newFood);
@@ -2304,6 +2402,8 @@ function openEditModal(id){
         <input type="number" name="maxServings" value="${f.maxServings||2}" min="1" max="10" step="1"></div>
       ${categoryPickerHtml(curCat)}
       ${renderExtrasFields(f.extras||{})}
+      <div class="fg"><label>Variety tags <small style="color:var(--muted)">(1–3 food families, comma-separated)</small></label>
+        <input type="text" name="vtags" value="${esc((f.vtags||[]).join(', '))}" placeholder="blank = own family ('${esc(slugTag(f.name))}')"></div>
       <div class="mactions">
         ${isBase?`<button type="button" class="btn" id="btn-rfood">Reset</button>`
                 :`<button type="button" class="btn dng" id="btn-dfood">Delete</button>`}
@@ -2316,7 +2416,9 @@ function openEditModal(id){
       const d=new FormData(form);
       const ms=Math.max(1,parseInt(d.get('maxServings'))||2);
       const catVal=d.get('category')||'';
-      const upd={name:d.get('name').trim(),cal:+d.get('cal'),maxServings:ms,category:catVal,extras:extrasFromForm(form)};
+      const vt=parseVtags(d.get('vtags'));
+      // vtags:undefined (not delete) so the merge spreads CLEAR previously set tags
+      const upd={name:d.get('name').trim(),cal:+d.get('cal'),maxServings:ms,category:catVal,extras:extrasFromForm(form),vtags:vt.length?vt:undefined};
       if(isBase){
         S.overrides[id]={...upd};
       } else {
@@ -2739,7 +2841,8 @@ function aiSystemPrompt(){
   const metricGoals=S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min');
   const foodLines=allFoods().map(f=>{
     const bits=metricGoals.map(g=>`${g.id} ${fmtVal(getMetric(f,g),g)}`).join(', ');
-    return `- ${f.name}: ${f.cal} cal, ${bits} [${getCategoryName(getFoodCategory(f))}]`;
+    const tags=f.vtags&&f.vtags.length?`tags: ${f.vtags.join(',')}`:'UNTAGGED';
+    return `- ${f.name}: ${f.cal} cal, ${bits} [${getCategoryName(getFoodCategory(f))}] (${tags})`;
   }).join('\n');
 
   const eaten=allFoods().filter(f=>servingsOf(f.id)>0)
@@ -2764,7 +2867,9 @@ Eaten today:
 ${eaten}
 Exercise burned today: ${S.exCals} cal
 ${healthNote}
-You can add new foods with the add_food tool. When the user mentions a food that is not in the library, estimate realistic per-serving values for every goal metric yourself — do not ask for values unless the food is truly ambiguous. Default to a temporary food (permanent=false, lasts today only) unless the user asks to save it to the library. After a tool call succeeds, confirm briefly with the values you used. Keep answers short and practical.`;
+You can add new foods with the add_food tool. When the user mentions a food that is not in the library, estimate realistic per-serving values for every goal metric yourself — do not ask for values unless the food is truly ambiguous. Default to a temporary food (permanent=false, lasts today only) unless the user asks to save it to the library. After a tool call succeeds, confirm briefly with the values you used. Keep answers short and practical.
+
+Variety tags ("vtags"): each food gets 1–3 lowercase family tags used to track weekly dietary variety — the specific identity family first (two pizza variants share "pizza"; they are zero variety apart), plus a broader nutritional family where meaningful (oatmeal ["oats","grains"]; black beans ["beans","legumes"]; a meal-replacement shake ["shake","protein-supp","grains"]). Reuse tags already in the library where they fit — variety scoring works by overlap. Always include vtags when adding a food. Use set_food_tags to tag existing foods; if the user asks to "tag my library", tag every UNTAGGED food in one set_food_tags call.`;
 }
 
 function aiTools(){
@@ -2787,14 +2892,36 @@ function aiTools(){
           permanent:{type:'boolean',description:'true = save permanently to the library; false = temporary food for today only (default)'},
           category:{type:'string',enum:S.categories.map(c=>c.id),description:'Tab to place the food in'},
           maxServings:{type:'integer',description:'Max servings per day the solver may use (default 2)'},
+          vtags:{type:'array',items:{type:'string'},description:'1–3 lowercase variety family tags, e.g. ["pizza"] or ["oats","grains"]'},
         },
         required:['name','cal','extras'],
+      },
+    },
+  },{
+    type:'function',
+    function:{
+      name:'set_food_tags',
+      description:'Assign variety family tags to existing foods (bulk-capable — use one call for "tag my library").',
+      parameters:{
+        type:'object',
+        properties:{
+          tags:{type:'array',items:{
+            type:'object',
+            properties:{
+              food:{type:'string',description:'Food name exactly as listed in the library'},
+              vtags:{type:'array',items:{type:'string'},description:'1–3 lowercase family tags'},
+            },
+            required:['food','vtags'],
+          }},
+        },
+        required:['tags'],
       },
     },
   }];
 }
 
 function aiExecTool(name,args){
+  if(name==='set_food_tags') return aiSetFoodTags(args);
   if(name!=='add_food') return {ok:false,error:'Unknown tool: '+name};
   const foodName=String(args.name||'').trim();
   if(!foodName) return {ok:false,error:'name is required'};
@@ -2811,9 +2938,36 @@ function aiExecTool(name,args){
     const v=args.extras&&args.extras[g.id];
     food.extras[g.id]=v!==undefined&&v!==null?+v||0:(g.default??0);
   }
+  const vt=Array.isArray(args.vtags)?parseVtags(args.vtags.join(',')):[];
+  if(vt.length) food.vtags=vt;
   if(args.permanent) S.custom.push(food); else S.temp.push(food);
   saveState(); render();
-  return {ok:true,added:food.name,cal:food.cal,permanent:!!args.permanent,extras:food.extras};
+  return {ok:true,added:food.name,cal:food.cal,permanent:!!args.permanent,extras:food.extras,vtags:food.vtags};
+}
+
+function aiSetFoodTags(args){
+  const items=Array.isArray(args.tags)?args.tags:[];
+  if(!items.length) return {ok:false,error:'tags array is empty'};
+  const foods=allFoods({includeArchived:true});
+  let tagged=0; const missed=[];
+  for(const it of items){
+    const nm=String(it.food||'').trim().toLowerCase();
+    const vt=Array.isArray(it.vtags)?parseVtags(it.vtags.join(',')):[];
+    if(!nm||!vt.length){ missed.push(it.food||'(blank)'); continue; }
+    const f=foods.find(x=>x.name.toLowerCase()===nm)||foods.find(x=>x.name.toLowerCase().includes(nm));
+    if(!f){ missed.push(it.food); continue; }
+    if(f.isBase){
+      S.overrides[f.id]={...(S.overrides[f.id]||{}),vtags:vt};
+    } else {
+      const ci=S.custom.findIndex(x=>x.id===f.id);
+      if(ci>=0) S.custom[ci]={...S.custom[ci],vtags:vt};
+      const ti=S.temp.findIndex(x=>x.id===f.id);
+      if(ti>=0) S.temp[ti]={...S.temp[ti],vtags:vt};
+    }
+    tagged++;
+  }
+  saveState(); render();
+  return {ok:true,tagged,missed};
 }
 
 async function aiSend(text){
@@ -2862,14 +3016,17 @@ function renderChatLog(){
   if(!el) return;
   let html='';
   if(!AI.msgs.length){
-    html+=`<div class="chat-msg sys">Ask me to add foods — e.g. "add a bowl of chili as a temp food" — and I'll estimate the values.</div>`;
+    html+=`<div class="chat-msg sys">Ask me to add foods — e.g. "add a bowl of chili as a temp food" — and I'll estimate the values. Or say "tag my library" to set variety tags on everything.</div>`;
   }
   for(const m of AI.msgs){
     if(m.role==='user') html+=`<div class="chat-msg user">${esc(m.content)}</div>`;
     else if(m.role==='assistant'&&m.content) html+=`<div class="chat-msg ai">${esc(m.content)}</div>`;
     else if(m.role==='tool'){
       let r=null; try{r=JSON.parse(m.content);}catch{}
-      if(r&&r.ok) html+=`<div class="chat-msg tool">✓ Added "${esc(r.added)}" — ${r.cal} cal (${r.permanent?'saved to library':'temporary, today only'})</div>`;
+      if(r&&r.ok&&r.tagged!==undefined){
+        html+=`<div class="chat-msg tool">✓ Tagged ${r.tagged} food${r.tagged===1?'':'s'}${r.missed&&r.missed.length?` — not found: ${esc(r.missed.join(', '))}`:''}</div>`;
+      }
+      else if(r&&r.ok) html+=`<div class="chat-msg tool">✓ Added "${esc(r.added)}" — ${r.cal} cal (${r.permanent?'saved to library':'temporary, today only'})</div>`;
       else if(r) html+=`<div class="chat-msg sys">⚠ ${esc(r.error||'tool failed')}</div>`;
     }
     else if(m.role==='_sys') html+=`<div class="chat-msg sys">${esc(m.content)}</div>`;
