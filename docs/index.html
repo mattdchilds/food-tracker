@@ -1961,7 +1961,8 @@ function renderBanner(st){
   if(hasEaten() && S.incFeas && S.incFeas.hash===incFeasHash() && S.incFeas.count===0 && !S.incFeas.truncated){
     if(!allGoalsMet(st.sums,st.avgs)){
       banner.className=''; // warning style (yellow)
-      banner.textContent='⚠️ No valid plan completion exists from this state — consider removing a food or resetting the day.';
+      banner.innerHTML='⚠️ No valid plan completion exists from this state — <button type="button" class="btn btn-sm" id="btn-state-relax">🔓 Relax goals to fit</button> or remove a food / reset the day.';
+      document.getElementById('btn-state-relax').addEventListener('click',openStateRelaxDialog);
       return;
     }
   }
@@ -2261,13 +2262,15 @@ function goalsWithChanges(base, changes){
     : g.type==='range' ? {...g,goal:changes[g.id]} : {...g,threshold:changes[g.id]});
 }
 
-// Exact feasibility of adding one serving of foodId under a candidate goal
-// set, via a dedicated worker (doesn't disturb the precomp/incremental ones).
+// Exact feasibility under a candidate goal set, via a dedicated worker
+// (doesn't disturb the precomp/incremental ones). With a foodId: can one
+// more serving of it be added? With null: does the current state have any
+// valid completion at all (the stuck-banner case)?
 function exactFeasWithGoals(goals, foodId){
   return new Promise(resolve=>{
     _relaxResolve=resolve;
     _relaxWorker=spawnWorker(
-      ev=>{ _relaxWorker=null; if(_relaxResolve===resolve){_relaxResolve=null; resolve(ev.data.feasMap[foodId]!==false);} },
+      ev=>{ _relaxWorker=null; if(_relaxResolve===resolve){_relaxResolve=null; resolve(foodId ? ev.data.feasMap[foodId]!==false : ev.data.count>0);} },
       err=>{ console.error('Relax search worker error:',err); _relaxWorker=null; if(_relaxResolve===resolve){_relaxResolve=null; resolve(null);} }
     );
     _relaxWorker.postMessage({
@@ -2284,6 +2287,8 @@ function exactFeasWithGoals(goals, foodId){
 // Returns {changes,deg} like relaxNeededFor, or null if even relaxing every
 // non-cal goal to nothing doesn't make the food fit (or the search was
 // cancelled). tok must stay === _relaxSearchTok for the search to continue.
+// f=null searches for the relaxation that unsticks the CURRENT state instead
+// of one that admits an extra serving of f.
 async function searchJointRelax(f, tok, onTick){
   const base=effGoals();
   const cands=base.filter(g=>g.id!=='cal'&&g.type!=='range');
@@ -2291,7 +2296,7 @@ async function searchJointRelax(f, tok, onTick){
   let runs=0;
   const feas=async ch=>{
     runs++; if(onTick) onTick(runs);
-    const ok=await exactFeasWithGoals(goalsWithChanges(base,ch), f.id);
+    const ok=await exactFeasWithGoals(goalsWithChanges(base,ch), f&&f.id);
     return _relaxSearchTok===tok ? ok : null;
   };
 
@@ -2408,6 +2413,59 @@ function openRelaxDialog(f, info){
       acts.insertBefore(btn,acts.firstChild);
     });
   }
+}
+
+// The day is stuck: the exact solver found zero valid completions from the
+// current state (usually after several servings of one food squeezed the
+// remaining calorie room). Same joint search as the add-food dialog, minus
+// the added food — applying just relaxes goals so the day can be finished.
+function openStateRelaxDialog(){
+  openModal(`<h2>🔓 Plan is stuck</h2>
+    <p style="margin-bottom:8px">No combination of the remaining foods can finish today within the current goals.</p>
+    <p id="relax-joint" style="margin-bottom:14px;font-size:13px;opacity:.75">⏳ Searching for the smallest combination of goals to relax…</p>
+    <div class="mactions" id="relax-actions">
+      <button type="button" class="btn" id="btn-track-free">Track freely</button>
+      <button type="button" class="btn btn-cancel">Cancel</button>
+    </div>`);
+  document.getElementById('btn-track-free').addEventListener('click',()=>{
+    closeModal();
+    enterTrackingMode();
+    render();
+  });
+  cancelRelaxSearch();
+  const tok={}; _relaxSearchTok=tok;
+  searchJointRelax(null, tok, n=>{
+    const p=document.getElementById('relax-joint');
+    if(p&&_relaxSearchTok===tok) p.textContent=`⏳ Searching for the smallest combination of goals to relax… (${n} checked)`;
+  }).then(res=>{
+    if(_relaxSearchTok!==tok) return;
+    _relaxSearchTok=null;
+    const p=document.getElementById('relax-joint');
+    if(!p) return; // dialog replaced/closed meanwhile
+    if(!res||!Object.keys(res.changes).length){
+      p.textContent='Even relaxing every other goal doesn\'t unstick it — the calorie window itself can\'t be completed from here. Remove a food, reset the day, or track freely.';
+      return;
+    }
+    const rows=Object.entries(res.changes)
+      .map(([gid,nv])=>[S.goals.find(g=>g.id===gid),nv])
+      .filter(([g])=>g)
+      .map(([g,nv])=>`<li>${describeRelaxChange(g,nv)}</li>`).join('');
+    const many=Object.keys(res.changes).length>1;
+    p.outerHTML=`<p style="margin-bottom:8px">${many?'Relaxing these goals together':'Relaxing this goal'} for today only would let the day finish:</p>
+      <ul style="margin:0 0 14px 18px;font-size:13px;line-height:1.8">${rows}</ul>`;
+    const btn=document.createElement('button');
+    btn.type='button'; btn.className='btn pri';
+    btn.textContent=many?'Relax goals':'Relax goal';
+    btn.addEventListener('click',()=>{
+      closeModal();
+      S.tempGoals=Object.assign({},S.tempGoals,res.changes);
+      S.relaxScore=(S.relaxScore||0)+Object.keys(res.changes).length;
+      startIncFeasCompute();
+      saveState(); render();
+    });
+    const acts=document.getElementById('relax-actions');
+    acts.insertBefore(btn,acts.firstChild);
+  });
 }
 
 // Bypasses addServing's _incComputing guard: the user explicitly confirmed this
