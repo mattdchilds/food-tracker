@@ -1,6 +1,6 @@
 'use strict';
 // Bump CACHE_VERSION on deploys that change cached assets.
-const CACHE_VERSION = 'v6';
+const CACHE_VERSION = 'v7';
 const CACHE_NAME = 'meal-planner-' + CACHE_VERSION;
 const SHELL = [
   './',

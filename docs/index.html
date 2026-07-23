@@ -2869,7 +2869,9 @@ Exercise burned today: ${S.exCals} cal
 ${healthNote}
 You can add new foods with the add_food tool. When the user mentions a food that is not in the library, estimate realistic per-serving values for every goal metric yourself — do not ask for values unless the food is truly ambiguous. Default to a temporary food (permanent=false, lasts today only) unless the user asks to save it to the library. After a tool call succeeds, confirm briefly with the values you used. Keep answers short and practical.
 
-Variety tags ("vtags"): each food gets 1–3 lowercase family tags used to track weekly dietary variety — the specific identity family first (two pizza variants share "pizza"; they are zero variety apart), plus a broader nutritional family where meaningful (oatmeal ["oats","grains"]; black beans ["beans","legumes"]; a meal-replacement shake ["shake","protein-supp","grains"]). Reuse tags already in the library where they fit — variety scoring works by overlap. Always include vtags when adding a food. Use set_food_tags to tag existing foods; if the user asks to "tag my library", tag every UNTAGGED food in one set_food_tags call.`;
+Variety tags ("vtags"): each food gets 1–3 lowercase family tags used to track weekly dietary variety — the specific identity family first (two pizza variants share "pizza"; they are zero variety apart), plus a broader nutritional family where meaningful (oatmeal ["oats","grains"]; black beans ["beans","legumes"]; a meal-replacement shake ["shake","protein-supp","grains"]). Reuse tags already in the library where they fit — variety scoring works by overlap. Always include vtags when adding a food. Use set_food_tags to tag existing foods; if the user asks to "tag my library", tag every UNTAGGED food in one set_food_tags call.
+
+Use update_foods to change values on existing foods, including bulk fills — e.g. "fill in costs for my library": estimate a realistic grocery cost per serving (US dollars, home-prepared unless the food is clearly restaurant/takeout) for EVERY food and send one update_foods call with extras.cost for each. Never invent a value of 0 to mean "unknown" — give your best estimate. Combined requests are fine: one update_foods call can set costs and vtags together.`;
 }
 
 function aiTools(){
@@ -2917,11 +2919,35 @@ function aiTools(){
         required:['tags'],
       },
     },
+  },{
+    type:'function',
+    function:{
+      name:'update_foods',
+      description:'Update existing foods in bulk: goal metric values, calories, variety tags, or max servings. Use for requests like "fill in costs for my whole library" — estimate values yourself and send one call covering every food. Only include the fields being changed.',
+      parameters:{
+        type:'object',
+        properties:{
+          updates:{type:'array',items:{
+            type:'object',
+            properties:{
+              food:{type:'string',description:'Food name exactly as listed in the library'},
+              cal:{type:'number',description:'New calories per serving'},
+              extras:{type:'object',description:'Goal metric values to set (only those changing)',properties:extraProps},
+              vtags:{type:'array',items:{type:'string'},description:'1–3 lowercase family tags'},
+              maxServings:{type:'integer'},
+            },
+            required:['food'],
+          }},
+        },
+        required:['updates'],
+      },
+    },
   }];
 }
 
 function aiExecTool(name,args){
   if(name==='set_food_tags') return aiSetFoodTags(args);
+  if(name==='update_foods') return aiUpdateFoods(args);
   if(name!=='add_food') return {ok:false,error:'Unknown tool: '+name};
   const foodName=String(args.name||'').trim();
   if(!foodName) return {ok:false,error:'name is required'};
@@ -2968,6 +2994,49 @@ function aiSetFoodTags(args){
   }
   saveState(); render();
   return {ok:true,tagged,missed};
+}
+
+// Bulk-edit existing foods (AI tool). Base foods get a partial override merged
+// on top of any existing one; extras merge per-key so untouched metrics keep
+// their values. Matches by exact name first, then substring.
+function aiUpdateFoods(args){
+  const items=Array.isArray(args.updates)?args.updates:[];
+  if(!items.length) return {ok:false,error:'updates array is empty'};
+  const foods=allFoods({includeArchived:true});
+  const metricGoals=S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min');
+  let updated=0; const missed=[];
+  for(const it of items){
+    const nm=String(it.food||'').trim().toLowerCase();
+    const f=nm?(foods.find(x=>x.name.toLowerCase()===nm)||foods.find(x=>x.name.toLowerCase().includes(nm))):null;
+    if(!f){ missed.push(it.food||'(blank)'); continue; }
+    const upd={};
+    if(it.cal!==undefined&&it.cal!==null) upd.cal=Math.max(0,Math.round(+it.cal||0));
+    if(it.maxServings!==undefined&&it.maxServings!==null) upd.maxServings=Math.max(1,parseInt(it.maxServings)||f.maxServings||2);
+    if(Array.isArray(it.vtags)){
+      const vt=parseVtags(it.vtags.join(','));
+      if(vt.length) upd.vtags=vt;
+    }
+    const ex={};
+    if(it.extras&&typeof it.extras==='object')
+      for(const g of metricGoals){
+        const v=it.extras[g.id];
+        if(v!==undefined&&v!==null) ex[g.id]=+v||0;
+      }
+    const hasEx=Object.keys(ex).length>0;
+    if(!Object.keys(upd).length&&!hasEx){ missed.push(f.name+' (no recognized fields)'); continue; }
+    if(f.isBase){
+      const prev=S.overrides[f.id]||{};
+      S.overrides[f.id]={...prev,...upd};
+      if(hasEx) S.overrides[f.id].extras={...(prev.extras||{}),...ex};
+    } else {
+      const patch=o=>({...o,...upd,...(hasEx?{extras:{...(o.extras||{}),...ex}}:{})});
+      const ci=S.custom.findIndex(x=>x.id===f.id); if(ci>=0) S.custom[ci]=patch(S.custom[ci]);
+      const ti=S.temp.findIndex(x=>x.id===f.id); if(ti>=0) S.temp[ti]=patch(S.temp[ti]);
+    }
+    updated++;
+  }
+  saveState(); render();
+  return {ok:true,updated,missed};
 }
 
 async function aiSend(text){
@@ -3025,6 +3094,9 @@ function renderChatLog(){
       let r=null; try{r=JSON.parse(m.content);}catch{}
       if(r&&r.ok&&r.tagged!==undefined){
         html+=`<div class="chat-msg tool">✓ Tagged ${r.tagged} food${r.tagged===1?'':'s'}${r.missed&&r.missed.length?` — not found: ${esc(r.missed.join(', '))}`:''}</div>`;
+      }
+      else if(r&&r.ok&&r.updated!==undefined){
+        html+=`<div class="chat-msg tool">✓ Updated ${r.updated} food${r.updated===1?'':'s'}${r.missed&&r.missed.length?` — skipped: ${esc(r.missed.join(', '))}`:''}</div>`;
       }
       else if(r&&r.ok) html+=`<div class="chat-msg tool">✓ Added "${esc(r.added)}" — ${r.cal} cal (${r.permanent?'saved to library':'temporary, today only'})</div>`;
       else if(r) html+=`<div class="chat-msg sys">⚠ ${esc(r.error||'tool failed')}</div>`;
