@@ -294,6 +294,12 @@ const DEF_GOALS = [
   // remains after the trailing qualifying days' spend (see baseThr). Ships
   // disabled so the plan solver ignores it until per-food costs are entered.
   {id:'cost',   name:'Cost',         unit:'$',   type:'max',       threshold:70,            default:0,   builtin:true, weekly:true, enabled:false},
+  // Variety goals judge the rolling 7-day window from each food's vtags — no
+  // numeric per-food metric. vdiv: ≥ threshold distinct families per full week
+  // (today's required floor ramps up with the window, see baseThr). vrep: no
+  // family over threshold% of the week's servings once it has REPEAT_FLOOR+.
+  {id:'vdiv',   name:'Variety',      unit:'',    type:'variety_min', threshold:8,           default:0,   builtin:true},
+  {id:'vrep',   name:'Top Family',   unit:'%',   type:'variety_max', threshold:25,          default:0,   builtin:true},
 ];
 const DEF_EXERCISE_PRESETS = [
   {id:'ep-walk30',     name:'Walk (30 min)',     cal:150},
@@ -341,7 +347,7 @@ let _incWorker    = null;
 const WORKER_CODE = `
 'use strict';
 self.onmessage = function(e) {
-  const {foods, goals, exCals = 0, currentServings = {}, excludedIds = []} = e.data;
+  const {foods, goals, exCals = 0, currentServings = {}, excludedIds = [], variety = null} = e.data;
 
   // Locate goals by type
   const calGoal     = goals.find(g => g.id === 'cal');
@@ -455,6 +461,33 @@ self.onmessage = function(e) {
     }
   }
 
+  // Weekly variety: family-tag serving counts across the trailing window plus
+  // today's already-eaten servings. Checked only at complete plans — repetition
+  // is not monotone (adding other families dilutes a share), so no mid-tree
+  // pruning is sound.
+  let vTagCount = null, vTagsByFood = null, vNumTags = 0, vTotal = 0;
+  let vNeed = 0, vTopFrac = 1, vFloor = 3;
+  if (variety) {
+    const tagId = new Map();
+    const idOf = t => { let v = tagId.get(t); if (v === undefined) { v = vNumTags++; tagId.set(t, v); } return v; };
+    vTagsByFood = foods.map(f => (f._vt || []).map(idOf));
+    const trail = variety.trailCounts || {};
+    for (const t of Object.keys(trail)) idOf(t);
+    vTagCount = new Float64Array(vNumTags);
+    for (const t of Object.keys(trail)) vTagCount[tagId.get(t)] += trail[t];
+    vTotal = variety.trailTotal || 0;
+    for (const [foodId, servings] of Object.entries(currentServings)) {
+      if (!servings) continue;
+      const fi = foodIdxMap[foodId];
+      if (fi === undefined) continue;
+      vTotal += servings;
+      for (const t of vTagsByFood[fi]) vTagCount[t] += servings;
+    }
+    vNeed = variety.needDistinct || 0;
+    vTopFrac = variety.topFrac != null ? variety.topFrac : 1;
+    vFloor = variety.repeatFloor || 3;
+  }
+
   // Mutable search state — saved/restored via pre-allocated stack
   const srv      = new Uint8Array(n);
   const stSums   = new Float64Array(n * numGoals);
@@ -484,6 +517,19 @@ self.onmessage = function(e) {
         if (calNow > 0 && avgHW[gi] / calNow > avgMaxGoals[k].threshold) return;
       }
       if (cntGoal && gSums[cntIdx] < cntGoal.threshold) return;
+      if (vTagCount) {
+        let addTot = 0;
+        for (let j = 0; j < n; j++) { const sj = srv[j]; if (!sj) continue; addTot += sj; for (const t of vTagsByFood[j]) vTagCount[t] += sj; }
+        const tot = vTotal + addTot;
+        let distinct = 0, vOk = true;
+        for (let t = 0; t < vNumTags; t++) {
+          const c = vTagCount[t];
+          if (c > 0) distinct++;
+          if (c >= vFloor && c > vTopFrac * tot + 1e-9) vOk = false;
+        }
+        for (let j = 0; j < n; j++) { const sj = srv[j]; if (!sj) continue; for (const t of vTagsByFood[j]) vTagCount[t] -= sj; }
+        if (!vOk || distinct < vNeed) return;
+      }
       for (let j = 0; j < n; j++) {
         if (srv[j] > 0 && !feasBits[j]) { feasBits[j] = 1; feasCount++; }
       }
@@ -729,7 +775,21 @@ async function loadLibraryFromFile(){
 }
 
 function mergeGoals(saved){
-  const merged=DEF_GOALS.map(def=>{const sv=saved.find(g=>g.id===def.id);return sv?{...def,...sv,id:def.id,builtin:true}:{...def};});
+  const merged=DEF_GOALS.map(def=>{
+    const sv=saved.find(g=>g.id===def.id);
+    if(sv) return {...def,...sv,id:def.id,builtin:true};
+    const d={...def};
+    // First time the variety goals appear: seed from the legacy (pre-goal)
+    // LS variety targets so an edited minTags/topPct carries over.
+    if(d.id==='vdiv'||d.id==='vrep'){
+      const lv=LS.get(lk('variety'),null);
+      if(lv&&typeof lv==='object'){
+        if(d.id==='vdiv'&&lv.minTags>0) d.threshold=lv.minTags;
+        if(d.id==='vrep'&&lv.topPct>0) d.threshold=lv.topPct;
+      }
+    }
+    return d;
+  });
   return [...merged,...saved.filter(g=>!g.builtin)];
 }
 
@@ -962,7 +1022,7 @@ function computeStats(){
     if(!s) continue;
     rawCal += f.cal * s;
     for(const g of S.goals){
-      if(g.id==='cal') continue;
+      if(g.id==='cal'||isVarietyGoal(g)) continue; // variety judged from vtags, not a summed metric
       if(g.type==='count_min'){ sums[g.id]+= foodCountsForGoal(f,g)*s; continue; }
       const m = getMetric(f, g);
       sums[g.id] += m * s;
@@ -980,8 +1040,20 @@ function computeStats(){
 }
 
 function allGoalsMet(sums, avgs){
+  let vs=null; // varietyStats memo — only computed when a variety goal is on
   for(const g of S.goals){
     if(g.enabled===false) continue;
+    if(isVarietyGoal(g)){
+      if(!vs) vs=varietyStats();
+      if(g.type==='variety_min'){
+        if(vs.distinct<effThr(g)) return false;
+      } else if(vs.total>0){
+        const cap=effThr(g)/100;
+        for(const c of Object.values(vs.tagServings))
+          if(c>=REPEAT_FLOOR&&c>cap*vs.total+1e-9) return false;
+      }
+      continue;
+    }
     if(g.type==='range'){
       const netCal = sums['cal'];
       const eg = effGoalCal(g);
@@ -1062,7 +1134,7 @@ function histFoodMap(temp){
 // and dropping it from the window would erase its spend from the budget.
 function completionPctFor(day){
   const tempGoals = day.tempGoals || {};
-  const goals = S.goals.filter(g=>g.enabled!==false && !g.weekly);
+  const goals = S.goals.filter(g=>g.enabled!==false && !g.weekly && !isVarietyGoal(g));
   if(!goals.length) return 0;
   const foods = histFoodMap(day.temp);
   let rawCal = 0;
@@ -1151,7 +1223,8 @@ function trailingSpend(g){
 // Each food carries 1–3 `vtags` (identity family + broader nutritional family,
 // e.g. pizza L/M both ["pizza"]; Huel ["shake","protein-supp","grains"]).
 // Untagged foods default to their name slug — every food its own family.
-// Guidance only: never fed to the solver.
+// Enforced by the solver when the vdiv/vrep goals are enabled; otherwise the
+// week strip and 🔁 badge stay guidance-only.
 function slugTag(s){
   return String(s||'').toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,24);
 }
@@ -1163,15 +1236,20 @@ function vtagsOf(f){
 }
 
 const DEF_VARIETY={minTags:8,topPct:25}; // ≥8 distinct families/week; no family >25% of servings
+const REPEAT_FLOOR=3; // repetition cap only binds once a family has this many servings
+function isVarietyGoal(g){ return g.type==='variety_min'||g.type==='variety_max'; }
+
+// Targets now live on the vdiv/vrep goals (single source of truth; legacy LS
+// values are migrated into them by mergeGoals).
 function varietyCfg(){
-  const v=LS.get(lk('variety'),null);
-  return v&&typeof v==='object'?{...DEF_VARIETY,...v}:{...DEF_VARIETY};
+  const vd=S.goals.find(g=>g.type==='variety_min'), vr=S.goals.find(g=>g.type==='variety_max');
+  return {minTags:vd?vd.threshold:DEF_VARIETY.minTags, topPct:vr?vr.threshold:DEF_VARIETY.topPct};
 }
 
-// Servings per tag across the window (past qualifying days re-read from HIST,
-// today live). A multi-tag food counts toward each of its tags, but only once
-// toward the total — so no single tag can exceed 100% of servings.
-function varietyStats(){
+// Servings per tag (past qualifying days re-read from HIST, today live when
+// includeToday). A multi-tag food counts toward each of its tags, but only
+// once toward the total — so no single tag can exceed 100% of servings.
+function _varietyCounts(includeToday){
   const tagServings={}; let total=0;
   const addDay=(servings,foods)=>{
     for(const [id,s] of Object.entries(servings||{})){
@@ -1186,34 +1264,69 @@ function varietyStats(){
     if(d===today) continue;
     if(HIST[d]) addDay(HIST[d].servings,histFoodMap(HIST[d].temp));
   }
-  addDay(S.servings,histFoodMap(S.temp));
+  if(includeToday) addDay(S.servings,histFoodMap(S.temp));
+  return {tagServings,total};
+}
+
+// Past-days-only counts — the fixed part the solver builds on. Memoized with
+// the trailing-spend cache (same invalidation points).
+function trailVariety(){
+  ensureHistory();
+  const day=todayStr();
+  if(!_trailCache||_trailCache.day!==day) _trailCache={day,byGoal:{}};
+  if(!_trailCache.variety) _trailCache.variety=_varietyCounts(false);
+  return _trailCache.variety;
+}
+
+function varietyStats(){
+  const {tagServings,total}=_varietyCounts(true);
   let topTag='',topN=0;
   for(const [t,n] of Object.entries(tagServings)) if(n>topN){topN=n;topTag=t;}
   return {tagServings,total,distinct:Object.keys(tagServings).length,topTag,topShare:total>0?topN/total:0};
 }
 
-// Tags already at/over the repetition cap this week (min 3 servings so a
-// 2-of-6 early-week tag doesn't flag everything). Drives the 🔁 card badge.
+// Tags already at/over the repetition cap this week (REPEAT_FLOOR servings
+// minimum so a 2-of-6 early-week tag doesn't flag everything). Drives the 🔁
+// card badge and mirrors the solver's leaf check.
 function repeatTagSet(vs,vc){
   const set=new Set();
   if(vs.total>0) for(const [t,n] of Object.entries(vs.tagServings))
-    if(n>=3&&n/vs.total>=vc.topPct/100) set.add(t);
+    if(n>=REPEAT_FLOOR&&n/vs.total>=vc.topPct/100) set.add(t);
   return set;
+}
+
+// Solver payload for enforced variety goals (null when both are off). goals
+// must be the effGoals() output so pace/relaxed thresholds are already baked.
+function varietyWorkerCtx(goals){
+  const vd=goals.find(g=>g.type==='variety_min'), vr=goals.find(g=>g.type==='variety_max');
+  if(!vd&&!vr) return null;
+  const tv=trailVariety();
+  return {needDistinct:vd?vd.threshold:0, topFrac:vr?vr.threshold/100:1,
+          repeatFloor:REPEAT_FLOOR, trailCounts:tv.tagServings, trailTotal:tv.total};
 }
 
 // ═══════════════════════════════════════════════
 //  PRECOMPUTATION
 // ═══════════════════════════════════════════════
 function precompHash(){
-  const goalSig = effGoals().map(g=>
+  const goals = effGoals();
+  const goalSig = goals.map(g=>
     `${g.id}:${g.type}:${g.threshold??g.goal}:${g.range??''}:${g.default??0}:${g.targetCategory??''}`
   ).join('|');
-  const nonCalGoals = S.goals.filter(g=>g.type!=='count_min'&&g.id!=='cal');
+  const nonCalGoals = S.goals.filter(g=>g.type!=='count_min'&&g.id!=='cal'&&!isVarietyGoal(g));
+  // With variety enforced, plans also depend on food tags + the window's
+  // trailing tag counts — fold both in (skipped while off to avoid recomputes).
+  const vOn = goals.some(isVarietyGoal);
   const foodSig = allFoods().map(f=>{
     const extras = nonCalGoals.map(g=>getMetric(f,g)).join(':');
-    return `${f.id}:${f.cal}:${f.meal?1:0}:${f.maxServings||2}:${extras}:${getFoodCategory(f)}`;
+    return `${f.id}:${f.cal}:${f.meal?1:0}:${f.maxServings||2}:${extras}:${getFoodCategory(f)}${vOn?':'+vtagsOf(f).join('.'):''}`;
   }).join('|');
-  return goalSig+'|'+S.exCals+'|'+foodSig;
+  let vSig='';
+  if(vOn){
+    const tv=trailVariety();
+    vSig='|VT:'+Object.keys(tv.tagServings).sort().map(t=>`${t}=${tv.tagServings[t]}`).join(',')+'~'+tv.total;
+  }
+  return goalSig+'|'+S.exCals+'|'+foodSig+vSig;
 }
 
 function precompIsValid(){
@@ -1255,7 +1368,8 @@ function startPrecompute(){
     ev  => { _worker=null; _computing=false; storePrecomp(ev.data); },
     err => { console.error('Worker error:',err); _worker=null; _computing=false; render(); }
   );
-  _worker.postMessage({foods:allFoods().map(f=>({...f,_cat:getFoodCategory(f)})), goals:effGoals(), exCals:S.exCals});
+  const goals=effGoals();
+  _worker.postMessage({foods:allFoods().map(f=>({...f,_cat:getFoodCategory(f),_vt:vtagsOf(f)})), goals, exCals:S.exCals, variety:varietyWorkerCtx(goals)});
 }
 
 function storePrecomp(data){
@@ -1290,12 +1404,14 @@ function startIncFeasCompute(){
     },
     err => { console.error('IncFeas worker error:',err); _incWorker=null; _incComputing=false; render(); }
   );
+  const goals=effGoals();
   _incWorker.postMessage({
-    foods: allFoods().map(f=>({...f,_cat:getFoodCategory(f)})),
-    goals: effGoals(),
+    foods: allFoods().map(f=>({...f,_cat:getFoodCategory(f),_vt:vtagsOf(f)})),
+    goals,
     exCals: S.exCals,
     currentServings: S.servings,
-    excludedIds: Object.keys(S.excluded)
+    excludedIds: Object.keys(S.excluded),
+    variety: varietyWorkerCtx(goals)
   });
 }
 
@@ -1369,6 +1485,29 @@ function computeFeasibilityDP(foods, feasMap){
     totRemCal+=f.cal*avail;
     for(const g of goals){
       if(g.type==='count_min') totRemCount[g.id]=(totRemCount[g.id]||0)+(foodCountsForGoal(f,g)*avail);
+    }
+  }
+
+  // Variety goals — optimistic like the other DP bounds: repetition assumes
+  // every still-available serving of OTHER families can dilute the share;
+  // diversity counts every distinct family still addable.
+  const vdG=goals.find(g=>g.type==='variety_min'), vrG=goals.find(g=>g.type==='variety_max');
+  let vBase=null, vBaseTotal=0, vTotalAvail=0, vAvailByTag=null, vAttain=0;
+  if(vdG||vrG){
+    const tv=trailVariety();
+    vBase={...tv.tagServings};
+    vBaseTotal=tv.total;
+    vAvailByTag={};
+    for(const x of foods){
+      const s=servingsOf(x.id);
+      if(s){ vBaseTotal+=s; for(const t of vtagsOf(x)) vBase[t]=(vBase[t]||0)+s; }
+      const a=maxServingsOf(x.id)-servingsOf(x.id);
+      if(a>0){ vTotalAvail+=a; for(const t of vtagsOf(x)) vAvailByTag[t]=(vAvailByTag[t]||0)+a; }
+    }
+    if(vdG){
+      const have=new Set(Object.keys(vBase));
+      for(const t of Object.keys(vAvailByTag)) have.add(t);
+      vAttain=have.size; // best distinct-family count any plan can reach
     }
   }
 
@@ -1457,6 +1596,17 @@ function computeFeasibilityDP(foods, feasMap){
           if(g.threshold*newRawCal-newHW+calAwareRemHD<-1e-6) goalOk=false;
         }
       }
+      if(goalOk&&vrG){
+        const cap=vrG.threshold/100;
+        for(const t of vtagsOf(f)){
+          const c=(vBase[t]||0)+sx;
+          if(c<REPEAT_FLOOR) continue;
+          // Best case: every available serving outside this family dilutes it
+          const maxTot=vBaseTotal+sx+(vTotalAvail-(vAvailByTag[t]||0));
+          if(c>cap*maxTot+1e-9){ goalOk=false; break; }
+        }
+      }
+      if(goalOk&&vdG&&vAttain<vdG.threshold) goalOk=false;
       if(goalOk) ok=true;
     }
     feasMap[f.id]=ok;
@@ -1596,6 +1746,36 @@ function relaxNeededFor(f){
     }
   }
 
+  // Variety goals — same optimistic dilution/attainability bounds as the DP.
+  const vdG=goals.find(g=>g.type==='variety_min'), vrG=goals.find(g=>g.type==='variety_max');
+  if(vdG||vrG){
+    const tv=trailVariety();
+    const vBase={...tv.tagServings};
+    let vBaseTotal=tv.total, vTotalAvail=0;
+    const vAvailByTag={};
+    for(const x of foods){
+      const s=servingsOf(x.id);
+      if(s){ vBaseTotal+=s; for(const t of vtagsOf(x)) vBase[t]=(vBase[t]||0)+s; }
+      const a=maxServingsOf(x.id)-servingsOf(x.id);
+      if(a>0){ vTotalAvail+=a; for(const t of vtagsOf(x)) vAvailByTag[t]=(vAvailByTag[t]||0)+a; }
+    }
+    if(vrG){
+      let needPct=0;
+      for(const t of vtagsOf(f)){
+        const c=(vBase[t]||0)+sx;
+        if(c<REPEAT_FLOOR) continue;
+        const maxTot=vBaseTotal+sx+(vTotalAvail-(vAvailByTag[t]||0));
+        if(c>vrG.threshold/100*maxTot+1e-9) needPct=Math.max(needPct,Math.ceil(c/maxTot*100));
+      }
+      if(needPct>0) bump(vrG.id, needPct, (needPct-vrG.threshold)/Math.max(1,vrG.threshold));
+    }
+    if(vdG){
+      const have=new Set(Object.keys(vBase));
+      for(const t of Object.keys(vAvailByTag)) have.add(t);
+      if(have.size<vdG.threshold) bump(vdG.id, have.size, (vdG.threshold-have.size)/Math.max(1,vdG.threshold));
+    }
+  }
+
   // Exact solver says infeasible but every per-goal bound passes: goals conflict
   // jointly. Treat as barely-failing for display; no single number to bump.
   if(!Object.keys(changes).length) deg=.03;
@@ -1604,7 +1784,7 @@ function relaxNeededFor(f){
 function dofTier(deg){ return deg<=.06?1:deg<=.18?2:3; }
 
 function getDispGoals(){
-  return S.goals.filter(g=>g.enabled!==false&&g.id!=='cal'&&g.type!=='count_min').slice(0,2);
+  return S.goals.filter(g=>g.enabled!==false&&g.id!=='cal'&&g.type!=='count_min'&&!isVarietyGoal(g)).slice(0,2);
 }
 function getCategoryName(catId){
   return S.categories.find(c=>c.id===catId)?.name || catId;
@@ -1674,11 +1854,15 @@ function renderWeekStrip(st){
     budgets+=`<span${over?' class="over"':''} title="Spend across the window's tracked days plus today">💰 <b>${fmtVal(spent,g)}</b> / ${fmtVal(g.threshold,g)}${g.unit?' '+g.unit:''} this week</span>`;
   }
   const vs=varietyStats(), vc=varietyCfg();
+  const vdG=S.goals.find(g=>g.type==='variety_min'), vrG=S.goals.find(g=>g.type==='variety_max');
+  const vdOn=vdG&&vdG.enabled!==false, vrOn=vrG&&vrG.enabled!==false;
+  const need=vdOn?effThr(vdG):null; // today's enforced floor (ramps up to the weekly target)
   const divOk=vs.distinct>=vc.minTags;
+  const divBad=vdOn&&vs.distinct<need;
   const topPct=Math.round(vs.topShare*100);
-  const topOver=vs.total>0&&topPct>vc.topPct;
-  const variety=`<span class="wk-var${divOk?' ok':''}" id="wk-var-div" title="Distinct food families eaten this week — aim for at least ${vc.minTags}. Click to edit variety targets.">🎨 <b>${vs.distinct}</b>/${vc.minTags} families</span>
-    <span class="wk-var${topOver?' over':(vs.total?' ok':'')}" id="wk-var-top" title="Biggest food family's share of the week's servings — keep it at or under ${vc.topPct}%. Click to edit variety targets.">🔁 ${vs.topTag?`${esc(vs.topTag)} <b>${topPct}%</b>`:'—'} (≤${vc.topPct}%)</span>`;
+  const topOver=repeatTagSet(vs,{topPct:vrOn?effThr(vrG):vc.topPct}).size>0;
+  const variety=`<span class="wk-var${divBad?' over':(divOk?' ok':'')}" id="wk-var-div" title="Distinct food families eaten this week — aim for at least ${vc.minTags}.${vdOn?` Enforced: the planner requires ${need} by today (ramps up over the week).`:''} Click to edit variety goals.">🎨 <b>${vs.distinct}</b>/${vc.minTags} families</span>
+    <span class="wk-var${topOver?' over':(vs.total?' ok':'')}" id="wk-var-top" title="Biggest food family's share of the week's servings — keep it at or under ${vc.topPct}%.${vrOn?` Enforced once a family has ${REPEAT_FLOOR}+ servings.`:''} Click to edit variety goals.">🔁 ${vs.topTag?`${esc(vs.topTag)} <b>${topPct}%</b>`:'—'} (≤${vc.topPct}%)</span>`;
   el.innerHTML=`<span title="Days tracked to ≥${Math.round(QUALIFY_PCT*100)}% of goals count toward the week; untracked days are skipped">📅 Week</span>
     <span class="week-dots">${dots}</span>
     <span>${past} tracked day${past===1?'':'s'} + today</span>
@@ -1691,14 +1875,17 @@ function renderWeekStrip(st){
 }
 
 function openVarietyModal(){
-  const vc=varietyCfg();
-  openModal(`<h2>🎨 Variety Targets</h2>
+  const vd=S.goals.find(g=>g.type==='variety_min'), vr=S.goals.find(g=>g.type==='variety_max');
+  if(!vd||!vr) return;
+  openModal(`<h2>🎨 Variety Goals</h2>
     <form>
       <div class="fg"><label>Distinct food families per week <small style="color:var(--muted)">(at least)</small></label>
-        <input type="number" name="minTags" value="${vc.minTags}" min="1" max="50" step="1"></div>
+        <input type="number" name="minTags" value="${vd.threshold}" min="1" max="50" step="1"></div>
+      <div class="fg"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" name="divOn"${vd.enabled!==false?' checked':''} style="width:auto"> Enforce in planner <small style="color:var(--muted)">— required pace ramps up over the week (${effThr(vd)} by today)</small></label></div>
       <div class="fg"><label>Max share of one family <small style="color:var(--muted)">(% of the week's servings)</small></label>
-        <input type="number" name="topPct" value="${vc.topPct}" min="5" max="100" step="1"></div>
-      <div class="note">Guidance only — variety never constrains the plan. Untagged foods count as their own family; set tags in ✎ Edit Food → Variety tags, or ask the AI to "tag my library".</div>
+        <input type="number" name="topPct" value="${vr.threshold}" min="5" max="100" step="1"></div>
+      <div class="fg"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" name="repOn"${vr.enabled!==false?' checked':''} style="width:auto"> Enforce in planner <small style="color:var(--muted)">— binds once a family reaches ${REPEAT_FLOOR} servings this week</small></label></div>
+      <div class="note">When enforced, foods that would break variety tint red like any other goal — you can still add them by relaxing for the day. Untagged foods count as their own family; set tags in ✎ Edit Food → Variety tags, or ask the AI to "tag my library".</div>
       <div class="mactions">
         <button type="button" class="btn btn-cancel">Cancel</button>
         <button type="submit" class="btn pri">Save</button>
@@ -1706,11 +1893,12 @@ function openVarietyModal(){
     </form>`,
     form=>{
       const d=new FormData(form);
-      LS.set(lk('variety'),{
-        minTags:Math.max(1,parseInt(d.get('minTags'))||DEF_VARIETY.minTags),
-        topPct:Math.min(100,Math.max(5,parseInt(d.get('topPct'))||DEF_VARIETY.topPct)),
-      });
-      closeModal(); render();
+      vd.threshold=Math.max(1,Math.min(50,parseInt(d.get('minTags'))||DEF_VARIETY.minTags));
+      vd.enabled=!!d.get('divOn');
+      vr.threshold=Math.min(100,Math.max(5,parseInt(d.get('topPct'))||DEF_VARIETY.topPct));
+      vr.enabled=!!d.get('repOn');
+      startIncFeasCompute();
+      closeModal(); saveState(); render();
     });
 }
 
@@ -1790,7 +1978,10 @@ function fmtVal(v, g){
 
 // Base (pre-relaxation) threshold. Weekly goals: today's cap is whatever is
 // left of the weekly budget after the trailing qualifying days' spend.
+// variety_min: the weekly family target ramps with the window — a 1-day
+// window asks for 1/7 of it (rounded up), a full 7-day window asks for all.
 function baseThr(g){
+  if(g.type==='variety_min') return Math.max(1, Math.ceil(g.threshold*Math.min(7,weekWindowDates().length)/7));
   if(!g.weekly) return g.threshold;
   return Math.max(0, Math.round((g.threshold - trailingSpend(g))*100)/100);
 }
@@ -1806,7 +1997,7 @@ function effGoals(){
   return S.goals.filter(g=>g.enabled!==false).map(g=>{
     const tv=S.tempGoals?S.tempGoals[g.id]:undefined;
     if(tv!==undefined) return g.type==='range' ? {...g,goal:tv} : {...g,threshold:tv};
-    if(g.weekly) return {...g, threshold:baseThr(g)}; // bake remaining budget in
+    if(g.weekly||g.type==='variety_min') return {...g, threshold:baseThr(g)}; // bake remaining budget / today's pace in
     return g;
   });
 }
@@ -1828,6 +2019,7 @@ function renderStats(st){
   let html='';
   for(const g of S.goals){
     if(g.enabled===false) continue;
+    if(isVarietyGoal(g)) continue; // shown in the week strip, not the daily stats row
     if(g.type==='range'){
       const netCal=sums['cal']||0;
       const rawCal=netCal+S.exCals;
@@ -2039,7 +2231,7 @@ function describeRelaxChange(g, nv){
     const oldG=effGoalCal(g), delta=nv-oldG;
     return `${esc(g.name)}: ${oldG} ± ${g.range} → <b>${nv} ± ${g.range}</b>${unit} (${delta>0?'+':''}${delta})`;
   }
-  const dir=(g.type==='max'||g.type==='avg_max')?'≤':'≥';
+  const dir=(g.type==='max'||g.type==='avg_max'||g.type==='variety_max')?'≤':'≥';
   return `${esc(g.name)}: ${dir}${fmtVal(effThr(g),g)} → <b>${dir}${fmtVal(nv,g)}</b>${unit}`;
 }
 
@@ -2150,7 +2342,7 @@ function esc(s){
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 // ── Goal type labels ──────────────────────────
-const TYPE_LABELS = {range:'Range',min:'Minimum',max:'Maximum',avg_min:'Avg Min',avg_max:'Avg Max',count_min:'Count Min'};
+const TYPE_LABELS = {range:'Range',min:'Minimum',max:'Maximum',avg_min:'Avg Min',avg_max:'Avg Max',count_min:'Count Min',variety_min:'Weekly Variety',variety_max:'Weekly Cap'};
 
 // ── Settings / Goal Manager ───────────────────
 function openSettings(){
@@ -2160,7 +2352,9 @@ function openSettings(){
     else if(g.type==='count_min'){
       const catName=g.targetCategory?getCategoryName(g.targetCategory):'Meals (flag)';
       params=`≥ ${g.threshold} · tab: ${catName}`;
-    } else if(g.type==='min'||g.type==='avg_min') params=`≥ ${g.threshold}${g.unit?' '+g.unit:''}`;
+    } else if(g.type==='variety_min') params=`≥ ${g.threshold} families/week`;
+    else if(g.type==='variety_max') params=`≤ ${g.threshold}% of weekly servings`;
+    else if(g.type==='min'||g.type==='avg_min') params=`≥ ${g.threshold}${g.unit?' '+g.unit:''}`;
     else params=`≤ ${g.threshold}${g.unit?' '+g.unit:''}${g.weekly?' per week':''}`;
     const off=g.enabled===false;
     // 'cal' has no toggle: the solver can't run without a calorie window
@@ -2230,8 +2424,12 @@ function openGoalEditModal(existing, onSave){
   const isNew=!existing;
   const g=existing||{id:'',name:'',unit:'',type:'min',threshold:0,goal:1900,range:50,default:0,builtin:false};
 
-  const typeOpts=['range','min','max','avg_min','avg_max','count_min'].map(t=>
-    `<option value="${t}"${g.type===t?' selected':''}>${TYPE_LABELS[t]}</option>`
+  // variety types aren't user-creatable, but a builtin variety goal's disabled
+  // select must still show its own type
+  const typeList=['range','min','max','avg_min','avg_max','count_min'];
+  if(g.type&&!typeList.includes(g.type)) typeList.push(g.type);
+  const typeOpts=typeList.map(t=>
+    `<option value="${t}"${g.type===t?' selected':''}>${TYPE_LABELS[t]||t}</option>`
   ).join('');
 
   openModal(`<h2>${isNew?'＋ Add Goal':'✎ Edit Goal: '+esc(g.name)}</h2>
@@ -2294,7 +2492,9 @@ function openGoalEditModal(existing, onSave){
     } else {
       const lbl=g.weekly
         ?`Weekly budget${g.unit?' ('+g.unit+')':''} <small style="color:var(--muted)">— spread over the rolling 7-day window</small>`
-        :({min:'Minimum',max:'Maximum',avg_min:'Minimum average',avg_max:'Maximum average'}[type]||'Threshold');
+        :({min:'Minimum',max:'Maximum',avg_min:'Minimum average',avg_max:'Maximum average',
+           variety_min:'Distinct food families per week (minimum)',
+           variety_max:'Max share of one family (% of weekly servings)'}[type]||'Threshold');
       el.innerHTML=`<div class="fg"><label>${lbl}</label><input type="number" name="gparam1" value="${g.threshold??0}" step="any" required></div>`;
     }
   }
@@ -2315,7 +2515,7 @@ function categoryPickerHtml(selectedId){
 
 // ── Extras fields helper ──────────────────────
 function renderExtrasFields(vals){
-  const goals=S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min');
+  const goals=S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min'&&!isVarietyGoal(g));
   if(!goals.length) return '';
   let html='<div class="sep"></div><div class="sec-lbl">GOAL METRICS</div>';
   for(const g of goals){
@@ -2338,7 +2538,7 @@ function extrasFromForm(form){
   const d=new FormData(form);
   const extras={};
   for(const g of S.goals){
-    if(g.id==='cal'||g.type==='count_min') continue;
+    if(g.id==='cal'||g.type==='count_min'||isVarietyGoal(g)) continue;
     const raw=d.get('ex_'+g.id);
     if(raw!==null) extras[g.id]=parseFloat(raw)||0;
   }
@@ -2831,6 +3031,12 @@ function aiSystemPrompt(){
   const goalLines=S.goals.map(g=>{
     const off=g.enabled===false?' [goal currently disabled — still record this metric on new foods]':'';
     if(g.type==='range') return `- ${g.name} (id "${g.id}"): target ${effGoalCal(g)} ± ${g.range}${g.unit?' '+g.unit:''}${off}`;
+    if(isVarietyGoal(g)){
+      const voff=g.enabled===false?' [currently disabled — still set vtags on foods]':'';
+      return g.type==='variety_min'
+        ? `- ${g.name} (id "${g.id}"): at least ${g.threshold} distinct food families (vtags) across the rolling 7-day window; today's enforced floor is ${effThr(g)}${voff}`
+        : `- ${g.name} (id "${g.id}"): no single food family over ${g.threshold}% of the week's servings (binds once a family has ${REPEAT_FLOOR}+ servings)${voff}`;
+    }
     if(g.weekly) return `- ${g.name} (id "${g.id}"): weekly budget ${g.threshold}${g.unit?' '+g.unit:''} over a rolling 7-tracked-day window; ${fmtVal(effThr(g),g)}${g.unit?' '+g.unit:''} left for today${off}`;
     const dir=(g.type==='max'||g.type==='avg_max')?'at most':'at least';
     const kind=(g.type==='avg_min'||g.type==='avg_max')?'calorie-weighted average ':'';
@@ -2838,7 +3044,7 @@ function aiSystemPrompt(){
     return `- ${g.name} (id "${g.id}"): ${kind}${dir} ${effThr(g)}${g.unit?' '+g.unit:''}${cnt}${off}`;
   }).join('\n');
 
-  const metricGoals=S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min');
+  const metricGoals=S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min'&&!isVarietyGoal(g));
   const foodLines=allFoods().map(f=>{
     const bits=metricGoals.map(g=>`${g.id} ${fmtVal(getMetric(f,g),g)}`).join(', ');
     const tags=f.vtags&&f.vtags.length?`tags: ${f.vtags.join(',')}`:'UNTAGGED';
@@ -2877,7 +3083,7 @@ Use update_foods to change values on existing foods, including bulk fills — e.
 function aiTools(){
   const extraProps={};
   for(const g of S.goals){
-    if(g.id==='cal'||g.type==='count_min') continue;
+    if(g.id==='cal'||g.type==='count_min'||isVarietyGoal(g)) continue; // variety comes from vtags, not a number
     extraProps[g.id]={type:'number',description:`${g.name}${g.unit?' in '+g.unit:''} per serving`};
   }
   return [{
@@ -2960,7 +3166,7 @@ function aiExecTool(name,args){
     extras:{},
   };
   for(const g of S.goals){
-    if(g.id==='cal'||g.type==='count_min') continue;
+    if(g.id==='cal'||g.type==='count_min'||isVarietyGoal(g)) continue;
     const v=args.extras&&args.extras[g.id];
     food.extras[g.id]=v!==undefined&&v!==null?+v||0:(g.default??0);
   }
@@ -3003,7 +3209,7 @@ function aiUpdateFoods(args){
   const items=Array.isArray(args.updates)?args.updates:[];
   if(!items.length) return {ok:false,error:'updates array is empty'};
   const foods=allFoods({includeArchived:true});
-  const metricGoals=S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min');
+  const metricGoals=S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min'&&!isVarietyGoal(g));
   let updated=0; const missed=[];
   for(const it of items){
     const nm=String(it.food||'').trim().toLowerCase();
