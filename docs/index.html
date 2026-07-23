@@ -40,7 +40,9 @@ button,.card,.preset-chip,.cmp-card{touch-action:manipulation}
 .meals-badge.unmet{background:var(--bad-lt);color:var(--bad)}
 .ex-row{display:flex;align-items:center;gap:8px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);flex-wrap:wrap}
 .ex-row label{font-size:12px;font-weight:700;white-space:nowrap}
-.goals-badge{display:none;align-items:center;gap:4px;background:var(--ok-lt);color:var(--ok);border-radius:20px;padding:3px 12px;font-size:12px;font-weight:700;margin-left:auto}
+.goals-badge{display:none;align-items:center;gap:4px;background:var(--ok-lt);color:var(--ok);border-radius:20px;padding:3px 12px;font-size:12px;font-weight:700}
+.relax-score{display:inline-flex;align-items:center;gap:4px;background:var(--ok-lt);color:var(--ok);border-radius:20px;padding:3px 12px;font-size:12px;font-weight:700;margin-left:auto;cursor:default}
+.relax-score.bad{background:var(--warn-lt);color:var(--warn)}
 .preset-chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;min-height:32px}
 .preset-chip{display:inline-flex;align-items:center;gap:6px;background:var(--bg);border:1.5px solid var(--primary);border-radius:20px;padding:7px 14px;font-size:13px;cursor:pointer;transition:background .15s,color .15s;color:var(--text)}
 .preset-chip:hover{background:var(--primary);color:#fff}
@@ -199,6 +201,7 @@ select:disabled{opacity:.6;cursor:not-allowed}
     <input type="number" id="ex-input" min="0" max="5000" step="10" placeholder="0">
     <span style="font-size:11px;color:var(--muted)">cal</span>
     <button class="btn btn-sm" id="btn-ex-presets">Presets ▾</button>
+    <div class="relax-score" id="relax-score" title="Goal relaxations today">🔓 0</div>
     <div class="goals-badge" id="goals-badge">✓ All Goals Met!</div>
   </div>
 </div>
@@ -294,7 +297,7 @@ const DEF_CATEGORIES = [
 //  STATE
 // ═══════════════════════════════════════════════
 let S = {
-  goals:            [],  // [{id,name,unit,type,goal?,range?,threshold?,default,builtin}]
+  goals:            [],  // [{id,name,unit,type,goal?,range?,threshold?,default,builtin,enabled?}] — enabled===false means off; undefined = on
   exercisePresets:  [],  // [{id,name,cal}] — editable activity presets
   categories:       [],  // [{id,name,collapsed}] — display tabs
   sort:             'name', // active sort key
@@ -308,6 +311,7 @@ let S = {
   excluded: {},
   trackingMode: false,
   tempGoals: {},        // goalId→relaxed goal/threshold for today (degrees-of-failure)
+  relaxScore: 0,        // # of goal relaxations today (cumulative; restore doesn't undo)
 };
 
 let _computing    = false;
@@ -612,7 +616,8 @@ function showLibBanner(mode, handle, action){
     el.className='lib-banner warn';
     el.innerHTML='🔒 Re-authorize library file to '+(action==='save'?'keep your backup up to date':'load your saved food data')+'. &nbsp;'+
       '<button class="btn btn-sm pri" id="lbtn-reauth">Re-authorize</button> '+
-      '<button class="btn btn-sm" id="lbtn-unlink-b">Unlink File</button>';
+      '<button class="btn btn-sm" id="lbtn-unlink-b">Unlink File</button>'+
+      '<small style="flex-basis:100%;font-weight:400;opacity:.8">Tip: pick &ldquo;Allow on every visit&rdquo; in the browser prompt and this will never ask again.</small>';
     document.getElementById('lbtn-reauth').addEventListener('click',async()=>{
       try{
         const perm=await handle.requestPermission({mode:'readwrite'});
@@ -648,25 +653,13 @@ async function initLibFile(){
     if(handle){
       const perm=await handle.queryPermission({mode:'readwrite'});
       if(perm==='granted'){_libFileHandle=handle;await loadLibraryFromFile();return;}
-      // Auto-reauth on first user interaction (browser requires a gesture for requestPermission)
-      const doReauth=async()=>{
-        document.removeEventListener('click',doReauth);
-        document.removeEventListener('keydown',doReauth);
-        try{
-          const p=await handle.requestPermission({mode:'readwrite'});
-          if(p==='granted'){
-            _libFileHandle=handle;
-            document.getElementById('lib-banner').className='hidden';
-            await loadLibraryFromFile();
-            render();
-            if(!precompIsValid()&&!_computing) startPrecompute();
-          } else {
-            showLibBanner('reauth',handle);
-          }
-        }catch(e){ showLibBanner('reauth',handle); }
-      };
-      document.addEventListener('click',doReauth);
-      document.addEventListener('keydown',doReauth);
+      // Permission lapsed. Never auto-prompt (the old first-click reauth fired a
+      // surprise browser dialog every session) — show the passive banner and let
+      // the user grant deliberately. Chrome's prompt offers "Allow on every
+      // visit"; once chosen, queryPermission returns 'granted' on future visits
+      // and this banner never appears again. localStorage remains the source of
+      // truth meanwhile, so nothing is lost while unauthorized.
+      showLibBanner('reauth',handle,'load');
       return;
     }
   }catch(e){}
@@ -803,6 +796,7 @@ function loadState(){
   S.excluded     = day.excluded     || {};
   S.trackingMode = day.trackingMode || false;
   S.tempGoals    = day.tempGoals    || {};
+  S.relaxScore   = day.relaxScore   || 0;
   S.temp         = Array.isArray(day.temp) ? day.temp : [];
   loadPrecomp();
 }
@@ -820,7 +814,7 @@ function saveState(){
   saveLibraryToFile();
 }
 function saveDayState(){
-  LS.set(todayKey(), {servings:S.servings, exCals:S.exCals, excluded:S.excluded, trackingMode:S.trackingMode, tempGoals:S.tempGoals||{}, temp:S.temp||[]});
+  LS.set(todayKey(), {servings:S.servings, exCals:S.exCals, excluded:S.excluded, trackingMode:S.trackingMode, tempGoals:S.tempGoals||{}, relaxScore:S.relaxScore||0, temp:S.temp||[]});
 }
 
 // ═══════════════════════════════════════════════
@@ -965,6 +959,7 @@ function computeStats(){
 
 function allGoalsMet(sums, avgs){
   for(const g of S.goals){
+    if(g.enabled===false) continue;
     if(g.type==='range'){
       const netCal = sums['cal'];
       const eg = effGoalCal(g);
@@ -1382,7 +1377,7 @@ function relaxNeededFor(f){
 function dofTier(deg){ return deg<=.06?1:deg<=.18?2:3; }
 
 function getDispGoals(){
-  return S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min').slice(0,2);
+  return S.goals.filter(g=>g.enabled!==false&&g.id!=='cal'&&g.type!=='count_min').slice(0,2);
 }
 function getCategoryName(catId){
   return S.categories.find(c=>c.id===catId)?.name || catId;
@@ -1496,8 +1491,12 @@ function effThr(g){ return (S.tempGoals&&S.tempGoals[g.id]!==undefined) ? S.temp
 function effGoalCal(g){ return (S.tempGoals&&S.tempGoals[g.id]!==undefined) ? S.tempGoals[g.id] : g.goal; }
 // Goals with today's temp relaxations baked in — feed these to the solver so
 // feasibility honors relaxed values (raw S.goals stay untouched in settings).
+// Disabled goals (enabled===false; undefined = enabled for back-compat) are
+// dropped here, which removes them from the workers, DP fallback, relax
+// estimator, and precompHash in one place. 'cal' can never be disabled: the
+// solver enumerates plans inside the calorie window.
 function effGoals(){
-  return S.goals.map(g=>{
+  return S.goals.filter(g=>g.enabled!==false).map(g=>{
     const tv=S.tempGoals?S.tempGoals[g.id]:undefined;
     if(tv===undefined) return g;
     return g.type==='range' ? {...g,goal:tv} : {...g,threshold:tv};
@@ -1520,6 +1519,7 @@ function renderStats(st){
 
   let html='';
   for(const g of S.goals){
+    if(g.enabled===false) continue;
     if(g.type==='range'){
       const netCal=sums['cal']||0;
       const rawCal=netCal+S.exCals;
@@ -1556,6 +1556,10 @@ function renderStats(st){
   }
   document.getElementById('stats-row').innerHTML=html;
   document.getElementById('goals-badge').classList.toggle('show', allGoalsMet(sums,avgs));
+  const rs=document.getElementById('relax-score');
+  rs.textContent='🔓 '+(S.relaxScore||0);
+  rs.title=(S.relaxScore||0)+' goal relaxation'+(S.relaxScore===1?'':'s')+' today';
+  rs.classList.toggle('bad',(S.relaxScore||0)>0);
 }
 
 function makeCard(f, feas, ppcRange, relaxCache){
@@ -1744,6 +1748,7 @@ function openRelaxDialog(f, info){
   document.getElementById('btn-relax-add')?.addEventListener('click',()=>{
     closeModal();
     S.tempGoals=Object.assign({},S.tempGoals,info.changes);
+    S.relaxScore=(S.relaxScore||0)+Object.keys(info.changes).length;
     forceAddServing(f.id);
   });
   document.getElementById('btn-track-add').addEventListener('click',()=>{
@@ -1844,13 +1849,19 @@ function openSettings(){
       params=`≥ ${g.threshold} · tab: ${catName}`;
     } else if(g.type==='min'||g.type==='avg_min') params=`≥ ${g.threshold}${g.unit?' '+g.unit:''}`;
     else params=`≤ ${g.threshold}${g.unit?' '+g.unit:''}`;
-    return `<div class="goal-row">
+    const off=g.enabled===false;
+    // 'cal' has no toggle: the solver can't run without a calorie window
+    const toggle=g.id==='cal'
+      ? `<span class="goal-params" title="Calories anchor the plan solver and can't be disabled">always on</span>`
+      : `<button class="btn btn-sm${off?'':' pri'}" data-tog-g="${idx}" title="${off?'Enable':'Disable'} this goal">${off?'Off':'On'}</button>`;
+    return `<div class="goal-row"${off?' style="opacity:.55"':''}>
       <div class="goal-info">
         <span class="goal-name">${esc(g.name)}</span>
         <span class="goal-badge">${TYPE_LABELS[g.type]||g.type}</span>
         <span class="goal-params">${params}</span>
       </div>
       <div class="goal-actions">
+        ${toggle}
         <button class="btn btn-sm" data-edit-g="${idx}">Edit</button>
         ${!g.builtin?`<button class="btn btn-sm dng" data-del-g="${idx}">✕</button>`:''}
       </div>
@@ -1867,6 +1878,16 @@ function openSettings(){
     closeModal();
     openGoalEditModal(null, g=>{
       S.goals.push(g);
+      saveState(); render(); openSettings();
+    });
+  });
+  document.querySelectorAll('[data-tog-g]').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      const idx=+btn.dataset.togG;
+      const g=S.goals[idx];
+      if(g.id==='cal') return;
+      S.goals[idx]={...g, enabled:g.enabled===false};
+      startIncFeasCompute();
       saveState(); render(); openSettings();
     });
   });
@@ -2466,7 +2487,7 @@ function openCategoriesModal(){
 // ── Reset Day ─────────────────────────────────
 function resetDay(){
   if(!confirm('Clear all eaten foods for today?')) return;
-  S.servings={}; S.exCals=0; S.temp=[]; S.excluded={}; S.trackingMode=false; S.tempGoals={};
+  S.servings={}; S.exCals=0; S.temp=[]; S.excluded={}; S.trackingMode=false; S.tempGoals={}; S.relaxScore=0;
   cancelIncFeas();
   S.incFeas=null;
   document.getElementById('ex-input').value='';

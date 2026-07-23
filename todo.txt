@@ -1,5 +1,6 @@
--Make mobile - into progressive web app. Compress and rearrange where needed.
--Allow for 1/2 servings, not used by solver
--Allow degrees of failure. Each data type has a value - for example, calories has +100, protein has -10, health score has -0.05. Instead of greying out food that would push over a limit, mark them red. If clicked, it pushes one or multiple of those scores thresholds up, which is visible to the user. A "number of thresholds" value is visible. For example, I really want to eat a donut but it would make my day unsolvable due to health - But it just now pushes it from threshold 1->2, and the health score is -.05 more leniant. If then I want to eat oatmeal which would not be available due to not enough protein, its red, and clicking on it goes threshold 2->3, and protein requirement is laxed one .
--Make temporary foods last until the next day - right now they dissapear on refresh.
--Add LLM support - It should be able to see current foods, add a food or a temporary food and fill in its values.
+[DONE 2026-07-23] Permission rework: no more surprise prompt each session; passive banner + pick "Allow on every visit" in Chrome's prompt once = silent forever after
+[DONE 2026-07-23] Relaxation score chip added at top (green 🔓 0, orange when >0; resets with each day / Reset Day)
+-Add new feature - track over last 7 days. I have two goals I want based around this - "Cost" (each meal has a $ amount), and "Variety", which ensures some food Variety. Days not tracked to completion (90%+ towards "all goals met") shouldn't be "seen", and it goes back farther. There should be a "reset weekly" button to reset.
+-Cost feature - There should be an "amount spent" over past 7 days tracked, using tracked history.
+-Variety - A new feature I'd like. Some way to ensure healthy variety. But foods would need to have some kind of way to show similarity to others - For example - Pizza slice large and pizza slice medium aren't variety. Oatmeal and black beans are. Huel and protein fluff might have some overlap. Instead of just coding this in, make a plan first and discuss it with user.
+[DONE 2026-07-23] Goals now have an On/Off toggle in the ⚙ Goals modal (Calories can't be turned off — it anchors the solver)
