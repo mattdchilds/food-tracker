@@ -332,8 +332,8 @@ let S = {
   incFeas:  null,
   excluded: {},
   trackingMode: false,
-  tempGoals: {},        // goalId→relaxed goal/threshold for today (degrees-of-failure)
-  relaxScore: 0,        // # of goal relaxations today (cumulative; restore doesn't undo)
+  relaxSteps: {},       // goalId→# of fixed relaxation steps taken today (see relaxStep)
+  relaxScore: 0,        // total relaxation steps today (cumulative; restore doesn't undo)
 };
 
 let _computing    = false;
@@ -861,6 +861,15 @@ function loadState(){
   // Library: goals + overrides + custom from localStorage (fast sync load; may be overridden by file)
   const saved = LS.get(lk('goals'), null);
   S.goals = Array.isArray(saved) ? mergeGoals(saved) : DEF_GOALS.map(g=>({...g}));
+  // One-time park of the weekly cost + variety trackers: they made every food
+  // entry a chore (a price and family tags per food) for tracking that went
+  // unused. Nothing is deleted — flip them back on in ⚙ Goals and the week
+  // strip chips, planner enforcement, and AI fields all come back.
+  if(!LS.get(lk('parked_weekly'), false)){
+    for(const g of S.goals) if(g.id==='cost' || isVarietyGoal(g)) g.enabled = false;
+    LS.set(lk('parked_weekly'), true);
+    LS.set(lk('goals'), S.goals);
+  }
   S.overrides        = LS.get(lk('overrides'), {});
   S.custom           = LS.get(lk('custom'), []);
   S.exercisePresets  = LS.get(lk('exPresets'), null) || DEF_EXERCISE_PRESETS.map(p=>({...p}));
@@ -873,7 +882,7 @@ function loadState(){
   S.exCals       = day.exCals       || 0;
   S.excluded     = day.excluded     || {};
   S.trackingMode = day.trackingMode || false;
-  S.tempGoals    = day.tempGoals    || {};
+  S.relaxSteps   = day.relaxSteps   || {};
   S.relaxScore   = day.relaxScore   || 0;
   S.temp         = Array.isArray(day.temp) ? day.temp : [];
   HIST = LS.get(lk('hist'), {}) || {};
@@ -896,7 +905,7 @@ function saveState(){
   saveLibraryToFile();
 }
 function saveDayState(){
-  LS.set(todayKey(), {servings:S.servings, exCals:S.exCals, excluded:S.excluded, trackingMode:S.trackingMode, tempGoals:S.tempGoals||{}, relaxScore:S.relaxScore||0, temp:S.temp||[]});
+  LS.set(todayKey(), {servings:S.servings, exCals:S.exCals, excluded:S.excluded, trackingMode:S.trackingMode, relaxSteps:S.relaxSteps||{}, relaxScore:S.relaxScore||0, temp:S.temp||[]});
 }
 
 // ═══════════════════════════════════════════════
@@ -1056,8 +1065,8 @@ function allGoalsMet(sums, avgs){
     }
     if(g.type==='range'){
       const netCal = sums['cal'];
-      const eg = effGoalCal(g);
-      if(netCal < eg-g.range || netCal > eg+g.range) return false;
+      const eg = effGoalCal(g), r = effRange(g);
+      if(netCal < eg-r || netCal > eg+r) return false;
     } else {
       const isAvg = g.type==='avg_min'||g.type==='avg_max';
       const v = isAvg ? (avgs[g.id]||0) : (sums[g.id]||0);
@@ -1128,12 +1137,12 @@ function histFoodMap(temp){
 
 // How completely a day was tracked: mean per-goal completion (0..1) across the
 // currently-enabled daily goals, judged against the goals as the app showed
-// them that day (tempGoals relaxations included — a fully tracked day with
+// them that day (relaxSteps included — a fully tracked day with
 // relaxed goals still qualifies; the relaxScore chip keeps that honest).
 // weekly-budget goals are excluded: an expensive day is still a tracked day,
 // and dropping it from the window would erase its spend from the budget.
 function completionPctFor(day){
-  const tempGoals = day.tempGoals || {};
+  const steps = day.relaxSteps || {};
   const goals = S.goals.filter(g=>g.enabled!==false && !g.weekly && !isVarietyGoal(g));
   if(!goals.length) return 0;
   const foods = histFoodMap(day.temp);
@@ -1155,13 +1164,13 @@ function completionPctFor(day){
   const netCal = rawCal - (day.exCals||0);
   let tot = 0;
   for(const g of goals){
-    const tv = tempGoals[g.id];
+    const rg = applySteps(g, steps[g.id]||0); // that day's relaxed goal
     let c;
     if(g.type==='range'){
-      const goal = (tv!==undefined?tv:g.goal) || 1;
+      const goal = rg.goal || 1;
       c = netCal<=0 ? 0 : Math.min(netCal,goal)/Math.max(netCal,goal);
     } else {
-      const thr = tv!==undefined?tv:g.threshold;
+      const thr = rg.threshold;
       const isAvg = g.type==='avg_min'||g.type==='avg_max';
       const v = isAvg ? (rawCal>0?hw[g.id]/rawCal:0) : (sums[g.id]||0);
       if(g.type==='max'||g.type==='avg_max') c = v<=thr ? 1 : (v>0?thr/v:1);
@@ -1186,6 +1195,15 @@ function weekWindowDates(){
     if(rec && rec.completionPct >= QUALIFY_PCT) dates.push(d);
   }
   return dates;
+}
+
+// The week's only score: relaxation steps taken across the window's tracked
+// days plus today. 0 = every day finished inside its configured goals.
+function weekRelaxScore(){
+  const today=todayStr();
+  let n=0;
+  for(const d of weekWindowDates()) n += d===today ? (S.relaxScore||0) : (HIST[d]?.relaxScore||0);
+  return n;
 }
 
 function histSpend(rec, g){
@@ -1665,16 +1683,23 @@ function relaxNeededFor(f){
   // afford counts below stay sane when f itself overshoots calories.
   const remCalHeadroom=Math.max(0,calMaxRaw-newRawCal);
 
+  // changes maps goalId → TOTAL relaxation steps needed (today's already-taken
+  // steps included), never a bespoke threshold: bump() converts the raw slack a
+  // goal is short by into whole rungs of that goal's fixed step.
   const changes={};
   let deg=0;
-  const bump=(gid,val,rel)=>{ changes[gid]=val; if(rel>deg) deg=rel; };
+  const bump=(gid,slack,rel)=>{
+    const raw=S.goals.find(x=>x.id===gid); if(!raw) return;
+    changes[gid]=stepsForSlack(raw, stepsOf(raw), slack);
+    if(rel>deg) deg=rel;
+  };
 
   if(newRawCal>calMaxRaw){
     const delta=newRawCal-calMaxRaw;
-    bump('cal', Math.ceil(calGoal.goal+delta), delta/Math.max(1,calGoal.goal));
+    bump('cal', delta, delta/Math.max(1,calGoal.goal));
   } else if(newRawCal+remCal<calMinRaw){
     const delta=calMinRaw-(newRawCal+remCal);
-    bump('cal', Math.floor(calGoal.goal-delta), delta/Math.max(1,calGoal.goal));
+    bump('cal', delta, delta/Math.max(1,calGoal.goal));
   }
 
   for(const g of goals){
@@ -1685,7 +1710,7 @@ function relaxNeededFor(f){
       const newM=sumsNow[g.id]+fc*sx;
       const remM=(totRemCount[g.id]||0)-fc*avail+fc*(avail-sx);
       const attain=newM+remM;
-      if(attain<g.threshold) bump(g.id, Math.max(0,Math.floor(attain)), (g.threshold-attain)/Math.max(1,g.threshold));
+      if(attain<g.threshold) bump(g.id, g.threshold-attain, (g.threshold-attain)/Math.max(1,g.threshold));
 
     } else if(g.type==='min'){
       const m=getMetric(f,g);
@@ -1699,12 +1724,12 @@ function relaxNeededFor(f){
         calAwareRem+=getMetric(j,g)*afford;
       }
       const attain=newSum+calAwareRem;
-      if(attain<g.threshold) bump(g.id, Math.max(0,Math.floor(attain)), (g.threshold-attain)/Math.max(1,g.threshold));
+      if(attain<g.threshold) bump(g.id, g.threshold-attain, (g.threshold-attain)/Math.max(1,g.threshold));
 
     } else if(g.type==='max'){
       const m=getMetric(f,g);
       const newSum=sumsNow[g.id]+m*sx;
-      if(newSum>g.threshold) bump(g.id, Math.ceil(newSum), (newSum-g.threshold)/Math.max(1,g.threshold));
+      if(newSum>g.threshold) bump(g.id, newSum-g.threshold, (newSum-g.threshold)/Math.max(1,g.threshold));
 
     } else if(g.type==='avg_min'&&newRawCal>0){
       const m=getMetric(f,g);
@@ -1722,7 +1747,7 @@ function relaxNeededFor(f){
       }
       if(newHW-g.threshold*newRawCal+calAwareRemHS<-1e-6){
         const thr2=Math.max(0,Math.floor((newHW+calAwareRemHS)/newRawCal*100)/100);
-        bump(g.id, thr2, (g.threshold-thr2)/Math.max(.01,g.threshold));
+        bump(g.id, g.threshold-thr2, (g.threshold-thr2)/Math.max(.01,g.threshold));
       }
 
     } else if(g.type==='avg_max'&&newRawCal>0){
@@ -1741,7 +1766,7 @@ function relaxNeededFor(f){
       }
       if(g.threshold*newRawCal-newHW+calAwareRemHD<-1e-6){
         const thr2=Math.ceil((newHW-calAwareRemHD)/newRawCal*100)/100;
-        bump(g.id, thr2, (thr2-g.threshold)/Math.max(.01,g.threshold));
+        bump(g.id, thr2-g.threshold, (thr2-g.threshold)/Math.max(.01,g.threshold));
       }
     }
   }
@@ -1767,12 +1792,12 @@ function relaxNeededFor(f){
         const maxTot=vBaseTotal+sx+(vTotalAvail-(vAvailByTag[t]||0));
         if(c>vrG.threshold/100*maxTot+1e-9) needPct=Math.max(needPct,Math.ceil(c/maxTot*100));
       }
-      if(needPct>0) bump(vrG.id, needPct, (needPct-vrG.threshold)/Math.max(1,vrG.threshold));
+      if(needPct>0) bump(vrG.id, needPct-vrG.threshold, (needPct-vrG.threshold)/Math.max(1,vrG.threshold));
     }
     if(vdG){
       const have=new Set(Object.keys(vBase));
       for(const t of Object.keys(vAvailByTag)) have.add(t);
-      if(have.size<vdG.threshold) bump(vdG.id, have.size, (vdG.threshold-have.size)/Math.max(1,vdG.threshold));
+      if(have.size<vdG.threshold) bump(vdG.id, vdG.threshold-have.size, (vdG.threshold-have.size)/Math.max(1,vdG.threshold));
     }
   }
 
@@ -1843,8 +1868,8 @@ function renderWeekStrip(st){
   for(let i=dates.length-1;i>=0;i--){
     const d=dates[i];
     dots+=d===today
-      ?'<span class="week-dot t" title="Today (in progress)"></span>'
-      :`<span class="week-dot q" title="${d} — tracked to ${Math.round((HIST[d]?.completionPct||0)*100)}%"></span>`;
+      ?`<span class="week-dot t" title="Today (in progress) — ${S.relaxScore||0} relax step${S.relaxScore===1?'':'s'}"></span>`
+      :`<span class="week-dot q" title="${d} — tracked to ${Math.round((HIST[d]?.completionPct||0)*100)}%, ${HIST[d]?.relaxScore||0} relax step${HIST[d]?.relaxScore===1?'':'s'}"></span>`;
   }
   let budgets='';
   for(const g of S.goals){
@@ -1853,19 +1878,25 @@ function renderWeekStrip(st){
     const over=spent>g.threshold;
     budgets+=`<span${over?' class="over"':''} title="Spend across the window's tracked days plus today">💰 <b>${fmtVal(spent,g)}</b> / ${fmtVal(g.threshold,g)}${g.unit?' '+g.unit:''} this week</span>`;
   }
-  const vs=varietyStats(), vc=varietyCfg();
+  // Variety chips only while the variety goals are on — parked goals stay out
+  // of the strip entirely (re-enable them in ⚙ Goals to bring these back).
   const vdG=S.goals.find(g=>g.type==='variety_min'), vrG=S.goals.find(g=>g.type==='variety_max');
   const vdOn=vdG&&vdG.enabled!==false, vrOn=vrG&&vrG.enabled!==false;
-  const need=vdOn?effThr(vdG):null; // today's enforced floor (ramps up to the weekly target)
-  const divOk=vs.distinct>=vc.minTags;
-  const divBad=vdOn&&vs.distinct<need;
-  const topPct=Math.round(vs.topShare*100);
-  const topOver=repeatTagSet(vs,{topPct:vrOn?effThr(vrG):vc.topPct}).size>0;
-  const variety=`<span class="wk-var${divBad?' over':(divOk?' ok':'')}" id="wk-var-div" title="Distinct food families eaten this week — aim for at least ${vc.minTags}.${vdOn?` Enforced: the planner requires ${need} by today (ramps up over the week).`:''} Click to edit variety goals.">🎨 <b>${vs.distinct}</b>/${vc.minTags} families</span>
-    <span class="wk-var${topOver?' over':(vs.total?' ok':'')}" id="wk-var-top" title="Biggest food family's share of the week's servings — keep it at or under ${vc.topPct}%.${vrOn?` Enforced once a family has ${REPEAT_FLOOR}+ servings.`:''} Click to edit variety goals.">🔁 ${vs.topTag?`${esc(vs.topTag)} <b>${topPct}%</b>`:'—'} (≤${vc.topPct}%)</span>`;
+  let variety='';
+  if(vdOn||vrOn){
+    const vs=varietyStats(), vc=varietyCfg();
+    const need=vdOn?effThr(vdG):null; // today's enforced floor (ramps up to the weekly target)
+    const topPct=Math.round(vs.topShare*100);
+    const topOver=repeatTagSet(vs,{topPct:vrOn?effThr(vrG):vc.topPct}).size>0;
+    if(vdOn) variety+=`<span class="wk-var${vs.distinct<need?' over':(vs.distinct>=vc.minTags?' ok':'')}" id="wk-var-div" title="Distinct food families eaten this week — aim for at least ${vc.minTags}. Enforced: the planner requires ${need} by today (ramps up over the week). Click to edit variety goals.">🎨 <b>${vs.distinct}</b>/${vc.minTags} families</span>`;
+    if(vrOn) variety+=`<span class="wk-var${topOver?' over':(vs.total?' ok':'')}" id="wk-var-top" title="Biggest food family's share of the week's servings — keep it at or under ${vc.topPct}%. Enforced once a family has ${REPEAT_FLOOR}+ servings. Click to edit variety goals.">🔁 ${vs.topTag?`${esc(vs.topTag)} <b>${topPct}%</b>`:'—'} (≤${vc.topPct}%)</span>`;
+  }
+  const wkScore=weekRelaxScore();
+  const score=`<span class="${wkScore?'over':'ok'}" title="Goal-relaxation steps taken across the window's tracked days plus today. 0 is a clean week; each step is one predetermined rung of slack on one goal.">🔓 <b>${wkScore}</b> relax step${wkScore===1?'':'s'} this week</span>`;
   el.innerHTML=`<span title="Days tracked to ≥${Math.round(QUALIFY_PCT*100)}% of goals count toward the week; untracked days are skipped">📅 Week</span>
     <span class="week-dots">${dots}</span>
     <span>${past} tracked day${past===1?'':'s'} + today</span>
+    ${score}
     ${budgets}
     ${variety}
     <button class="btn btn-sm" id="btn-reset-week" style="margin-left:auto" title="Start the weekly window fresh from today">⟳ Reset week</button>`;
@@ -1924,17 +1955,21 @@ function renderTrackingBanner(){
 
 function renderRelaxBanner(){
   const el=document.getElementById('relax-banner');
-  const ids=Object.keys(S.tempGoals||{});
+  const ids=Object.keys(S.relaxSteps||{}).filter(gid=>S.relaxSteps[gid]>0);
   if(!ids.length){el.className='relax-banner';return;}
+  let steps=0;
   const parts=ids.map(gid=>{
     const g=S.goals.find(x=>x.id===gid); if(!g) return '';
-    const orig=g.type==='range'?g.goal:baseThr(g); // weekly: show today's cap, not the weekly budget
-    return `${esc(g.name)} ${fmtVal(S.tempGoals[gid],g)} (was ${fmtVal(orig,g)})`;
+    const n=S.relaxSteps[gid]; steps+=n;
+    // weekly goals show today's cap, not the weekly budget
+    return g.type==='range'
+      ? `${esc(g.name)} ±${fmtVal(applySteps(g,n).range,g)} (was ±${fmtVal(g.range,g)}) ×${n}`
+      : `${esc(g.name)} ${fmtVal(applySteps(g,n).threshold,g)} (was ${fmtVal(baseThr(g),g)}) ×${n}`;
   }).filter(Boolean).join(' · ');
   el.className='relax-banner show';
-  el.innerHTML=`🔓 Goals relaxed today: ${parts} &nbsp;<button class="btn btn-sm" id="btn-restore-goals">↺ Restore goals</button>`;
+  el.innerHTML=`🔓 Goals relaxed today — ${steps} step${steps===1?'':'s'}: ${parts} &nbsp;<button class="btn btn-sm" id="btn-restore-goals">↺ Restore goals</button>`;
   document.getElementById('btn-restore-goals').addEventListener('click',()=>{
-    S.tempGoals={};
+    S.relaxSteps={};
     startIncFeasCompute();
     saveState(); render();
   });
@@ -1957,12 +1992,10 @@ function renderBanner(st){
     banner.textContent='⏳ Checking plan feasibility...';
     return;
   }
-  // Show "stuck" warning when the exact incFeas result shows no valid completion exists
+  // No valid completion exists from here → relax the goals automatically
   if(hasEaten() && S.incFeas && S.incFeas.hash===incFeasHash() && S.incFeas.count===0 && !S.incFeas.truncated){
     if(!allGoalsMet(st.sums,st.avgs)){
-      banner.className=''; // warning style (yellow)
-      banner.innerHTML='⚠️ No valid plan completion exists from this state — <button type="button" class="btn btn-sm" id="btn-state-relax">🔓 Relax goals to fit</button> or remove a food / reset the day.';
-      document.getElementById('btn-state-relax').addEventListener('click',openStateRelaxDialog);
+      autoRelax(banner);
       return;
     }
   }
@@ -1986,26 +2019,76 @@ function baseThr(g){
   if(!g.weekly) return g.threshold;
   return Math.max(0, Math.round((g.threshold - trailingSpend(g))*100)/100);
 }
-function effThr(g){ return (S.tempGoals&&S.tempGoals[g.id]!==undefined) ? S.tempGoals[g.id] : baseThr(g); }
-function effGoalCal(g){ return (S.tempGoals&&S.tempGoals[g.id]!==undefined) ? S.tempGoals[g.id] : g.goal; }
-// Goals with today's temp relaxations baked in — feed these to the solver so
+
+// ── Fixed relaxation steps ────────────────────
+// Relaxations are never bespoke numbers. Every goal loosens in predetermined
+// increments, so a day's score is a plain count of steps taken: 0 = every goal
+// met exactly as configured, N = N rungs of slack borrowed. Step size is
+// derived from the goal itself (a 1/2/5 rounding of ~10% of its target) unless
+// the goal carries an explicit relaxStep.
+function niceStep(x){
+  if(!(x>0)) return 1;
+  const p=Math.pow(10,Math.floor(Math.log10(x))), m=x/p;
+  return (m<1.5?1:m<3.5?2:m<7.5?5:10)*p;
+}
+function relaxStep(g){
+  if(g.relaxStep>0) return g.relaxStep;
+  if(g.type==='range') return niceStep(g.range||50);                          // widens the window
+  if(g.type==='count_min'||g.type==='variety_min') return 1;                  // whole foods / families
+  if(g.type==='avg_min'||g.type==='avg_max') return Math.max(.01, niceStep(g.threshold*.1));
+  if(g.type==='variety_max') return Math.max(1, Math.round(niceStep(g.threshold*.2)));
+  return Math.max(g.unit==='$'?.5:1, niceStep(Math.abs(g.threshold)*.1));
+}
+function stepsOf(g){ return (S.relaxSteps&&S.relaxSteps[g.id])||0; }
+// Total steps that would buy `slack` more room on g beyond the `from` it already has.
+function stepsForSlack(g, from, slack){
+  return from + Math.max(1, Math.ceil((slack-1e-9)/relaxStep(g)));
+}
+// g with n relaxation steps applied. Range goals widen symmetrically (the
+// target never moves); every other type slides its threshold slack-ward.
+// Step size always comes from the RAW goal, so rungs stay the same size no
+// matter how far the day has already been relaxed.
+function applySteps(g, n){
+  if(!n) return (g.weekly||g.type==='variety_min') ? {...g, threshold:baseThr(g)} : g;
+  const d=n*relaxStep(g);
+  if(g.type==='range') return {...g, range:g.range+d};
+  if(g.type==='max'||g.type==='avg_max'||g.type==='variety_max'){
+    const v=baseThr(g)+d;
+    return {...g, threshold:g.type==='variety_max'?Math.min(100,v):v};
+  }
+  return {...g, threshold:Math.max(0, baseThr(g)-d)};
+}
+function effThr(g){ return applySteps(g,stepsOf(g)).threshold; }
+function effRange(g){ return g.range+stepsOf(g)*relaxStep(g); }
+function effGoalCal(g){ return g.goal; } // calorie relaxation widens the window; the target never moves
+// Goals with a given relaxation applied — feed these to the solver so
 // feasibility honors relaxed values (raw S.goals stay untouched in settings).
 // Disabled goals (enabled===false; undefined = enabled for back-compat) are
 // dropped here, which removes them from the workers, DP fallback, relax
 // estimator, and precompHash in one place. 'cal' can never be disabled: the
 // solver enumerates plans inside the calorie window.
-function effGoals(){
-  return S.goals.filter(g=>g.enabled!==false).map(g=>{
-    const tv=S.tempGoals?S.tempGoals[g.id]:undefined;
-    if(tv!==undefined) return g.type==='range' ? {...g,goal:tv} : {...g,threshold:tv};
-    if(g.weekly||g.type==='variety_min') return {...g, threshold:baseThr(g)}; // bake remaining budget / today's pace in
-    return g;
-  });
+function goalsWithSteps(steps){
+  return S.goals.filter(g=>g.enabled!==false).map(g=>applySteps(g, steps[g.id]||0));
+}
+function effGoals(){ return goalsWithSteps(S.relaxSteps||{}); }
+
+// Applies a {goalId: totalSteps} relaxation and charges the day's score for
+// whatever it added. Steps never decrease here — "Restore goals" clears them,
+// but the score it already cost stays on the books.
+function applyRelaxSteps(steps){
+  const next={...(S.relaxSteps||{})};
+  let added=0;
+  for(const [gid,n] of Object.entries(steps)){
+    const cur=next[gid]||0;
+    if(n>cur){ added+=n-cur; next[gid]=n; }
+  }
+  S.relaxSteps=next;
+  S.relaxScore=(S.relaxScore||0)+added;
 }
 
 function goalLabel(g){
-  return (S.tempGoals&&S.tempGoals[g.id]!==undefined)
-    ? `<span style="color:var(--warn)" title="Relaxed today">🔓 ${g.name}</span>` : g.name;
+  const n=stepsOf(g);
+  return n ? `<span style="color:var(--warn)" title="Relaxed ${n} step${n===1?'':'s'} today">🔓 ${g.name}</span>` : g.name;
 }
 
 function renderStats(st){
@@ -2024,8 +2107,8 @@ function renderStats(st){
     if(g.type==='range'){
       const netCal=sums['cal']||0;
       const rawCal=netCal+S.exCals;
-      const baseGoal=effGoalCal(g);
-      const effGoal=baseGoal+S.exCals, effMin=baseGoal-g.range+S.exCals, effMax=baseGoal+g.range+S.exCals;
+      const baseGoal=effGoalCal(g), rg=effRange(g);
+      const effGoal=baseGoal+S.exCals, effMin=baseGoal-rg+S.exCals, effMax=baseGoal+rg+S.exCals;
       const pctFill=Math.min(100,effMax>0?rawCal/effMax*100:0).toFixed(1)+'%';
       const inWin=rawCal>=effMin&&rawCal<=effMax;
       const color=inWin?'g':rawCal>effMax?'b':rawCal>=effMin*.9?'w':'b';
@@ -2060,7 +2143,7 @@ function renderStats(st){
   document.getElementById('goals-badge').classList.toggle('show', allGoalsMet(sums,avgs));
   const rs=document.getElementById('relax-score');
   rs.textContent='🔓 '+(S.relaxScore||0);
-  rs.title=(S.relaxScore||0)+' goal relaxation'+(S.relaxScore===1?'':'s')+' today';
+  rs.title=(S.relaxScore||0)+' goal-relaxation step'+(S.relaxScore===1?'':'s')+' today — 0 is a perfect day';
   rs.classList.toggle('bad',(S.relaxScore||0)>0);
 }
 
@@ -2234,32 +2317,17 @@ function enterTrackingMode(){
 // weren't needed, and step the survivors back one rung. Each probe costs one
 // worker run (same work as the recompute after any tap), so the whole search
 // finishes while the dialog is open.
-const RELAX_LADDER=[0.08,0.15,0.25,0.4,0.6,1];
+// Rungs are step COUNTS, so whatever the search lands on is a value the user
+// could have dialed in by hand — no bespoke thresholds.
+const RELAX_LADDER=[1,2,3,5,8,13];
 let _relaxWorker=null, _relaxResolve=null, _relaxSearchTok=null;
+let _autoRelaxHash=null, _autoRelaxFailed=false; // see autoRelax()
 
 function cancelRelaxSearch(){
   _relaxSearchTok=null;
+  _autoRelaxHash=null; // a cancelled auto-relax should retry on the next render
   if(_relaxWorker){_relaxWorker.terminate();_relaxWorker=null;}
   if(_relaxResolve){const r=_relaxResolve;_relaxResolve=null;r(null);}
-}
-
-// One goal's threshold relaxed by fraction lam in its slack direction.
-function relaxGoalVal(g, lam){
-  const t=g.threshold;
-  if(g.type==='max'||g.type==='avg_max'||g.type==='variety_max'){
-    // Additive fallback when the cap is already 0 (e.g. weekly budget spent)
-    let v=t>0 ? t*(1+lam) : (g.type==='avg_max'?lam:lam*10);
-    v=(g.type==='avg_max') ? Math.ceil(v*100)/100 : Math.ceil(v);
-    return g.type==='variety_max' ? Math.min(100,v) : v;
-  }
-  let v=t*(1-lam);
-  v=(g.type==='avg_min') ? Math.floor(v*100)/100 : Math.floor(v);
-  return Math.max(0,v);
-}
-
-function goalsWithChanges(base, changes){
-  return base.map(g=>changes[g.id]===undefined ? g
-    : g.type==='range' ? {...g,goal:changes[g.id]} : {...g,threshold:changes[g.id]});
 }
 
 // Exact feasibility under a candidate goal set, via a dedicated worker
@@ -2290,36 +2358,30 @@ function exactFeasWithGoals(goals, foodId){
 // f=null searches for the relaxation that unsticks the CURRENT state instead
 // of one that admits an extra serving of f.
 async function searchJointRelax(f, tok, onTick){
-  const base=effGoals();
-  const cands=base.filter(g=>g.id!=='cal'&&g.type!=='range');
+  const cur=S.relaxSteps||{};
+  const cands=S.goals.filter(g=>g.enabled!==false&&g.id!=='cal'&&g.type!=='range');
   if(!cands.length) return null;
   let runs=0;
   const feas=async ch=>{
     runs++; if(onTick) onTick(runs);
-    const ok=await exactFeasWithGoals(goalsWithChanges(base,ch), f&&f.id);
+    const ok=await exactFeasWithGoals(goalsWithSteps({...cur,...ch}), f&&f.id);
     return _relaxSearchTok===tok ? ok : null;
   };
 
-  // Phase 1: smallest uniform rung that makes f feasible
-  let lamIdx=-1, changes=null;
+  // Phase 1: smallest uniform rung (added to whatever each goal already has)
+  // that makes f feasible
+  let rungIdx=-1, changes=null;
   for(let i=0;i<RELAX_LADDER.length;i++){
     const ch={};
-    for(const g of cands){ const v=relaxGoalVal(g,RELAX_LADDER[i]); if(v!==g.threshold) ch[g.id]=v; }
-    if(!Object.keys(ch).length) continue;
+    for(const g of cands) ch[g.id]=(cur[g.id]||0)+RELAX_LADDER[i];
     const ok=await feas(ch);
     if(ok===null) return null;
-    if(ok){ lamIdx=i; changes=ch; break; }
+    if(ok){ rungIdx=i; changes=ch; break; }
   }
   if(!changes) return null;
 
-  const relDelta=gid=>{
-    const g=cands.find(x=>x.id===gid);
-    const unit=(g.type==='avg_min'||g.type==='avg_max')?.01:1;
-    return Math.abs(changes[gid]-g.threshold)/Math.max(unit,Math.abs(g.threshold));
-  };
-
-  // Phase 2: restore goals that weren't actually needed, biggest bump first
-  for(const gid of Object.keys(changes).sort((a,b)=>relDelta(b)-relDelta(a))){
+  // Phase 2: restore goals that weren't actually needed
+  for(const gid of Object.keys(changes)){
     if(Object.keys(changes).length<=1) break;
     const trial={...changes}; delete trial[gid];
     const ok=await feas(trial);
@@ -2328,32 +2390,43 @@ async function searchJointRelax(f, tok, onTick){
   }
 
   // Phase 3: step each surviving goal back one rung if it stays feasible
-  if(lamIdx>0){
+  if(rungIdx>0){
     for(const gid of Object.keys(changes)){
-      const g=cands.find(x=>x.id===gid);
-      const v=relaxGoalVal(g,RELAX_LADDER[lamIdx-1]);
-      if(v===changes[gid]||v===g.threshold) continue;
-      const trial={...changes,[gid]:v};
+      const n=(cur[gid]||0)+RELAX_LADDER[rungIdx-1];
+      if(n>=changes[gid]) continue;
+      const trial={...changes,[gid]:n};
       const ok=await feas(trial);
       if(ok===null) return null;
       if(ok) changes=trial;
     }
   }
 
+  // deg tints the card; a step count is already a "how bad" measure.
   let deg=0;
-  for(const gid of Object.keys(changes)) deg=Math.max(deg,relDelta(gid));
-  return {changes,deg};
+  for(const gid of Object.keys(changes)) deg=Math.max(deg,(changes[gid]-(cur[gid]||0))/8);
+  return {changes, deg:Math.min(1,deg)};
 }
 
 // ── Degrees-of-failure dialog ─────────────────
-function describeRelaxChange(g, nv){
-  const unit=g.unit?` ${g.unit}`:'';
+// n is a TOTAL step count for g; the row shows where the goal stands now, where
+// it would land, and how many rungs that costs on the day's score.
+function describeRelaxChange(g, n){
+  const unit=g.unit?` ${g.unit}`:'', k=n-stepsOf(g);
+  const cost=` <small style="opacity:.7">(+${k} step${k===1?'':'s'})</small>`;
   if(g.type==='range'){
-    const oldG=effGoalCal(g), delta=nv-oldG;
-    return `${esc(g.name)}: ${oldG} ± ${g.range} → <b>${nv} ± ${g.range}</b>${unit} (${delta>0?'+':''}${delta})`;
+    return `${esc(g.name)}: ${g.goal} ± ${fmtVal(effRange(g),g)} → <b>${g.goal} ± ${fmtVal(applySteps(g,n).range,g)}</b>${unit}${cost}`;
   }
   const dir=(g.type==='max'||g.type==='avg_max'||g.type==='variety_max')?'≤':'≥';
-  return `${esc(g.name)}: ${dir}${fmtVal(effThr(g),g)} → <b>${dir}${fmtVal(nv,g)}</b>${unit}`;
+  return `${esc(g.name)}: ${dir}${fmtVal(effThr(g),g)} → <b>${dir}${fmtVal(applySteps(g,n).threshold,g)}</b>${unit}${cost}`;
+}
+// Total added rungs a change set would cost — the number the score goes up by.
+function relaxCost(changes){
+  let n=0;
+  for(const [gid,v] of Object.entries(changes)){
+    const g=S.goals.find(x=>x.id===gid); if(!g) continue;
+    n+=Math.max(0, v-stepsOf(g));
+  }
+  return n;
 }
 
 function openRelaxDialog(f, info){
@@ -2371,14 +2444,13 @@ function openRelaxDialog(f, info){
        <p id="relax-joint" style="margin-bottom:14px;font-size:13px;opacity:.75">⏳ Searching for the smallest combination of goals to relax…</p>`;
   openModal(`<h2>🔓 Doesn't fit the plan</h2>${body}
     <div class="mactions" id="relax-actions">
-      ${entries.length?`<button type="button" class="btn pri" id="btn-relax-add">Relax goals & add</button>`:''}
+      ${entries.length?`<button type="button" class="btn pri" id="btn-relax-add">Relax goals & add (+${relaxCost(info.changes)})</button>`:''}
       <button type="button" class="btn" id="btn-track-add">Track freely</button>
       <button type="button" class="btn btn-cancel">Cancel</button>
     </div>`);
   const applyRelax=changes=>{
     closeModal();
-    S.tempGoals=Object.assign({},S.tempGoals,changes);
-    S.relaxScore=(S.relaxScore||0)+Object.keys(changes).length;
+    applyRelaxSteps(changes);
     forceAddServing(f.id);
   };
   document.getElementById('btn-relax-add')?.addEventListener('click',()=>applyRelax(info.changes));
@@ -2407,7 +2479,7 @@ function openRelaxDialog(f, info){
         <ul style="margin:0 0 14px 18px;font-size:13px;line-height:1.8">${rowsFor(res.changes)}</ul>`;
       const btn=document.createElement('button');
       btn.type='button'; btn.className='btn pri'; btn.id='btn-relax-add';
-      btn.textContent=many?'Relax goals & add':'Relax goal & add';
+      btn.textContent=`${many?'Relax goals & add':'Relax goal & add'} (+${relaxCost(res.changes)})`;
       btn.addEventListener('click',()=>applyRelax(res.changes));
       const acts=document.getElementById('relax-actions');
       acts.insertBefore(btn,acts.firstChild);
@@ -2417,55 +2489,34 @@ function openRelaxDialog(f, info){
 
 // The day is stuck: the exact solver found zero valid completions from the
 // current state (usually after several servings of one food squeezed the
-// remaining calorie room). Same joint search as the add-food dialog, minus
-// the added food — applying just relaxes goals so the day can be finished.
-function openStateRelaxDialog(){
-  openModal(`<h2>🔓 Plan is stuck</h2>
-    <p style="margin-bottom:8px">No combination of the remaining foods can finish today within the current goals.</p>
-    <p id="relax-joint" style="margin-bottom:14px;font-size:13px;opacity:.75">⏳ Searching for the smallest combination of goals to relax…</p>
-    <div class="mactions" id="relax-actions">
-      <button type="button" class="btn" id="btn-track-free">Track freely</button>
-      <button type="button" class="btn btn-cancel">Cancel</button>
-    </div>`);
-  document.getElementById('btn-track-free').addEventListener('click',()=>{
-    closeModal();
-    enterTrackingMode();
-    render();
-  });
-  cancelRelaxSearch();
-  const tok={}; _relaxSearchTok=tok;
-  searchJointRelax(null, tok, n=>{
-    const p=document.getElementById('relax-joint');
-    if(p&&_relaxSearchTok===tok) p.textContent=`⏳ Searching for the smallest combination of goals to relax… (${n} checked)`;
-  }).then(res=>{
-    if(_relaxSearchTok!==tok) return;
-    _relaxSearchTok=null;
-    const p=document.getElementById('relax-joint');
-    if(!p) return; // dialog replaced/closed meanwhile
-    if(!res||!Object.keys(res.changes).length){
-      p.textContent='Even relaxing every other goal doesn\'t unstick it — the calorie window itself can\'t be completed from here. Remove a food, reset the day, or track freely.';
-      return;
-    }
-    const rows=Object.entries(res.changes)
-      .map(([gid,nv])=>[S.goals.find(g=>g.id===gid),nv])
-      .filter(([g])=>g)
-      .map(([g,nv])=>`<li>${describeRelaxChange(g,nv)}</li>`).join('');
-    const many=Object.keys(res.changes).length>1;
-    p.outerHTML=`<p style="margin-bottom:8px">${many?'Relaxing these goals together':'Relaxing this goal'} for today only would let the day finish:</p>
-      <ul style="margin:0 0 14px 18px;font-size:13px;line-height:1.8">${rows}</ul>`;
-    const btn=document.createElement('button');
-    btn.type='button'; btn.className='btn pri';
-    btn.textContent=many?'Relax goals':'Relax goal';
-    btn.addEventListener('click',()=>{
-      closeModal();
-      S.tempGoals=Object.assign({},S.tempGoals,res.changes);
-      S.relaxScore=(S.relaxScore||0)+Object.keys(res.changes).length;
+// remaining calorie room). A dead-end warning is never the right answer — the
+// planner just takes the smallest ladder relaxation that unsticks the day and
+// charges the score for it. The relax banner and score chip keep that visible;
+// "Restore goals" undoes it. Only the genuinely unfixable case shows a message.
+function autoRelax(banner){
+  const h=incFeasHash();
+  const overlayOpen=!document.getElementById('overlay').classList.contains('h');
+  // One search at a time, and never while a relax dialog is driving its own.
+  if(_autoRelaxHash!==h && !overlayOpen && _relaxSearchTok===null){
+    _autoRelaxHash=h; _autoRelaxFailed=false;
+    const tok={}; _relaxSearchTok=tok;
+    searchJointRelax(null, tok).then(res=>{
+      if(_relaxSearchTok!==tok) return;
+      _relaxSearchTok=null;
+      if(!res||!Object.keys(res.changes).length){ _autoRelaxFailed=true; render(); return; }
+      applyRelaxSteps(res.changes);
       startIncFeasCompute();
       saveState(); render();
     });
-    const acts=document.getElementById('relax-actions');
-    acts.insertBefore(btn,acts.firstChild);
-  });
+  }
+  if(_autoRelaxFailed && _autoRelaxHash===h){
+    banner.className=''; // warning style (yellow)
+    banner.innerHTML='⚠️ Even relaxing every goal can\'t finish today from here — remove a food, reset the day, or <button type="button" class="btn btn-sm" id="btn-state-free">track freely</button>.';
+    document.getElementById('btn-state-free').addEventListener('click',()=>{enterTrackingMode();render();});
+  } else {
+    banner.className='computing';
+    banner.textContent='🔓 Loosening goals so today can still finish…';
+  }
 }
 
 // Bypasses addServing's _incComputing guard: the user explicitly confirmed this
@@ -2719,8 +2770,10 @@ function categoryPickerHtml(selectedId){
 }
 
 // ── Extras fields helper ──────────────────────
+// Only enabled goals get a field — a parked goal's stored value is preserved
+// untouched by extrasFromForm rather than shown and re-entered.
 function renderExtrasFields(vals){
-  const goals=S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min'&&!isVarietyGoal(g));
+  const goals=S.goals.filter(g=>g.enabled!==false&&g.id!=='cal'&&g.type!=='count_min'&&!isVarietyGoal(g));
   if(!goals.length) return '';
   let html='<div class="sep"></div><div class="sec-lbl">GOAL METRICS</div>';
   for(const g of goals){
@@ -2739,9 +2792,9 @@ function renderExtrasFields(vals){
   return html;
 }
 
-function extrasFromForm(form){
+function extrasFromForm(form, prev){
   const d=new FormData(form);
-  const extras={};
+  const extras={...(prev||{})}; // keep metrics with no field (parked goals)
   for(const g of S.goals){
     if(g.id==='cal'||g.type==='count_min'||isVarietyGoal(g)) continue;
     const raw=d.get('ex_'+g.id);
@@ -2761,8 +2814,8 @@ function openAddModal(){
         <input type="number" name="maxServings" value="2" min="1" max="10" step="1"></div>
       ${categoryPickerHtml(defCatId)}
       ${renderExtrasFields({})}
-      <div class="fg"><label>Variety tags <small style="color:var(--muted)">(1–3 food families, comma-separated)</small></label>
-        <input type="text" name="vtags" placeholder="e.g. pizza — blank = own family"></div>
+      ${aiVarietyOn()?`<div class="fg"><label>Variety tags <small style="color:var(--muted)">(1–3 food families, comma-separated)</small></label>
+        <input type="text" name="vtags" placeholder="e.g. pizza — blank = own family"></div>`:''}
       <div class="sep"></div>
       <div class="fg">
         <label class="tog-row" id="perm-tog-lbl"><div class="tog on" id="perm-tog"></div> Save Permanently</label>
@@ -2783,7 +2836,7 @@ function openAddModal(){
         category:catVal,
         extras:extrasFromForm(form),
       };
-      const vtNew=parseVtags(d.get('vtags'));
+      const vtNew=d.get('vtags')!==null?parseVtags(d.get('vtags')):[];
       if(vtNew.length) newFood.vtags=vtNew;
       if(!newFood.name||newFood.cal<0) return;
       if(permOn) S.custom.push(newFood);
@@ -2807,8 +2860,8 @@ function openEditModal(id){
         <input type="number" name="maxServings" value="${f.maxServings||2}" min="1" max="10" step="1"></div>
       ${categoryPickerHtml(curCat)}
       ${renderExtrasFields(f.extras||{})}
-      <div class="fg"><label>Variety tags <small style="color:var(--muted)">(1–3 food families, comma-separated)</small></label>
-        <input type="text" name="vtags" value="${esc((f.vtags||[]).join(', '))}" placeholder="blank = own family ('${esc(slugTag(f.name))}')"></div>
+      ${aiVarietyOn()?`<div class="fg"><label>Variety tags <small style="color:var(--muted)">(1–3 food families, comma-separated)</small></label>
+        <input type="text" name="vtags" value="${esc((f.vtags||[]).join(', '))}" placeholder="blank = own family ('${esc(slugTag(f.name))}')"></div>`:''}
       <div class="mactions">
         ${isBase?`<button type="button" class="btn" id="btn-rfood">Reset</button>`
                 :`<button type="button" class="btn dng" id="btn-dfood">Delete</button>`}
@@ -2821,11 +2874,16 @@ function openEditModal(id){
       const d=new FormData(form);
       const ms=Math.max(1,parseInt(d.get('maxServings'))||2);
       const catVal=d.get('category')||'';
-      const vt=parseVtags(d.get('vtags'));
-      // vtags:undefined (not delete) so the merge spreads CLEAR previously set tags
-      const upd={name:d.get('name').trim(),cal:+d.get('cal'),maxServings:ms,category:catVal,extras:extrasFromForm(form),vtags:vt.length?vt:undefined};
+      const upd={name:d.get('name').trim(),cal:+d.get('cal'),maxServings:ms,category:catVal,extras:extrasFromForm(form,f.extras)};
+      if(d.get('vtags')!==null){
+        const vt=parseVtags(d.get('vtags'));
+        // vtags:undefined (not delete) so the merge spreads CLEAR previously set
+        // tags; skipped entirely when the field is hidden (variety goals parked)
+        upd.vtags=vt.length?vt:undefined;
+      }
       if(isBase){
-        S.overrides[id]={...upd};
+        // merge, so fields with no form field (parked goals) survive an edit
+        S.overrides[id]={...(S.overrides[id]||{}),...upd};
       } else {
         const ci=S.custom.findIndex(x=>x.id===id);
         if(ci>=0) S.custom[ci]={...S.custom[ci],...upd};
@@ -3215,7 +3273,7 @@ function openCategoriesModal(){
 // ── Reset Day ─────────────────────────────────
 function resetDay(){
   if(!confirm('Clear all eaten foods for today?')) return;
-  S.servings={}; S.exCals=0; S.temp=[]; S.excluded={}; S.trackingMode=false; S.tempGoals={}; S.relaxScore=0;
+  S.servings={}; S.exCals=0; S.temp=[]; S.excluded={}; S.trackingMode=false; S.relaxSteps={}; S.relaxScore=0;
   cancelIncFeas();
   S.incFeas=null;
   document.getElementById('ex-input').value='';
@@ -3233,34 +3291,41 @@ const AI = {
 function aiKey(){ return LS.get(lk('ai_key'),''); }
 function aiModel(){ return LS.get(lk('ai_model'),'gpt-5-mini'); }
 
+// Disabled goals are invisible to the assistant: it shouldn't reason about
+// them, and — the reason this matters day to day — it shouldn't have to invent
+// a value for every parked metric on every food it adds.
+function aiVarietyOn(){ return S.goals.some(g=>isVarietyGoal(g)&&g.enabled!==false); }
+function aiMetricGoals(){
+  return S.goals.filter(g=>g.enabled!==false&&g.id!=='cal'&&g.type!=='count_min'&&!isVarietyGoal(g));
+}
+
 function aiSystemPrompt(){
-  const goalLines=S.goals.map(g=>{
-    const off=g.enabled===false?' [goal currently disabled — still record this metric on new foods]':'';
-    if(g.type==='range') return `- ${g.name} (id "${g.id}"): target ${effGoalCal(g)} ± ${g.range}${g.unit?' '+g.unit:''}${off}`;
+  const vOn=aiVarietyOn();
+  const goalLines=S.goals.filter(g=>g.enabled!==false).map(g=>{
+    if(g.type==='range') return `- ${g.name} (id "${g.id}"): target ${effGoalCal(g)} ± ${effRange(g)}${g.unit?' '+g.unit:''}`;
     if(isVarietyGoal(g)){
-      const voff=g.enabled===false?' [currently disabled — still set vtags on foods]':'';
       return g.type==='variety_min'
-        ? `- ${g.name} (id "${g.id}"): at least ${g.threshold} distinct food families (vtags) across the rolling 7-day window; today's enforced floor is ${effThr(g)}${voff}`
-        : `- ${g.name} (id "${g.id}"): no single food family over ${g.threshold}% of the week's servings (binds once a family has ${REPEAT_FLOOR}+ servings)${voff}`;
+        ? `- ${g.name} (id "${g.id}"): at least ${g.threshold} distinct food families (vtags) across the rolling 7-day window; today's enforced floor is ${effThr(g)}`
+        : `- ${g.name} (id "${g.id}"): no single food family over ${g.threshold}% of the week's servings (binds once a family has ${REPEAT_FLOOR}+ servings)`;
     }
-    if(g.weekly) return `- ${g.name} (id "${g.id}"): weekly budget ${g.threshold}${g.unit?' '+g.unit:''} over a rolling 7-tracked-day window; ${fmtVal(effThr(g),g)}${g.unit?' '+g.unit:''} left for today${off}`;
+    if(g.weekly) return `- ${g.name} (id "${g.id}"): weekly budget ${g.threshold}${g.unit?' '+g.unit:''} over a rolling 7-tracked-day window; ${fmtVal(effThr(g),g)}${g.unit?' '+g.unit:''} left for today`;
     const dir=(g.type==='max'||g.type==='avg_max')?'at most':'at least';
     const kind=(g.type==='avg_min'||g.type==='avg_max')?'calorie-weighted average ':'';
     const cnt=g.type==='count_min'?' (count of qualifying foods eaten)':'';
-    return `- ${g.name} (id "${g.id}"): ${kind}${dir} ${effThr(g)}${g.unit?' '+g.unit:''}${cnt}${off}`;
+    return `- ${g.name} (id "${g.id}"): ${kind}${dir} ${effThr(g)}${g.unit?' '+g.unit:''}${cnt}`;
   }).join('\n');
 
-  const metricGoals=S.goals.filter(g=>g.id!=='cal'&&g.type!=='count_min'&&!isVarietyGoal(g));
+  const metricGoals=aiMetricGoals();
   const foodLines=allFoods().map(f=>{
     const bits=metricGoals.map(g=>`${g.id} ${fmtVal(getMetric(f,g),g)}`).join(', ');
-    const tags=f.vtags&&f.vtags.length?`tags: ${f.vtags.join(',')}`:'UNTAGGED';
-    return `- ${f.name}: ${f.cal} cal, ${bits} [${getCategoryName(getFoodCategory(f))}] (${tags})`;
+    const tags=vOn?` (${f.vtags&&f.vtags.length?`tags: ${f.vtags.join(',')}`:'UNTAGGED'})`:'';
+    return `- ${f.name}: ${f.cal} cal, ${bits} [${getCategoryName(getFoodCategory(f))}]${tags}`;
   }).join('\n');
 
   const eaten=allFoods().filter(f=>servingsOf(f.id)>0)
     .map(f=>`- ${f.name} ×${servingsOf(f.id)} (${f.cal*servingsOf(f.id)} cal)`).join('\n')||'- nothing yet';
 
-  const hasHealth=S.goals.some(g=>g.id==='health');
+  const hasHealth=S.goals.some(g=>g.id==='health'&&g.enabled!==false);
   const healthNote=hasHealth
     ?'\nThe "health" metric is a 0–1 score per food: ~0.10–0.20 junk food (candy, ice cream), ~0.35–0.45 fast food, ~0.55 average home cooking, ~0.70–0.85 wholesome (oats, eggs, legumes), ~0.90+ fruits/vegetables.'
     :'';
@@ -3281,18 +3346,19 @@ Exercise burned today: ${S.exCals} cal
 ${healthNote}
 You can add new foods with the add_food tool. When the user mentions a food that is not in the library, estimate realistic per-serving values for every goal metric yourself — do not ask for values unless the food is truly ambiguous. You also have web search: use it when the user names a specific brand, restaurant, or menu item (e.g. a fast-food order) so you can use the chain's published nutrition numbers instead of guessing, or when they ask you to look something up. For generic foods, your own estimates are fine — do not search for those. Default to a temporary food (permanent=false, lasts today only) unless the user asks to save it to the library. After a tool call succeeds, confirm briefly with the values you used. Keep answers short and practical.
 
-Variety tags ("vtags"): each food gets 1–3 lowercase family tags used to track weekly dietary variety — the specific identity family first (two pizza variants share "pizza"; they are zero variety apart), plus a broader nutritional family where meaningful (oatmeal ["oats","grains"]; black beans ["beans","legumes"]; a meal-replacement shake ["shake","protein-supp","grains"]). Reuse tags already in the library where they fit — variety scoring works by overlap. Always include vtags when adding a food. Use set_food_tags to tag existing foods; if the user asks to "tag my library", tag every UNTAGGED food in one set_food_tags call.
+${vOn?`Variety tags ("vtags"): each food gets 1–3 lowercase family tags used to track weekly dietary variety — the specific identity family first (two pizza variants share "pizza"; they are zero variety apart), plus a broader nutritional family where meaningful (oatmeal ["oats","grains"]; black beans ["beans","legumes"]; a meal-replacement shake ["shake","protein-supp","grains"]). Reuse tags already in the library where they fit — variety scoring works by overlap. Always include vtags when adding a food. Use set_food_tags to tag existing foods; if the user asks to "tag my library", tag every UNTAGGED food in one set_food_tags call.
 
-Use update_foods to change values on existing foods, including bulk fills — e.g. "fill in costs for my library": estimate a realistic grocery cost per serving (US dollars, home-prepared unless the food is clearly restaurant/takeout) for EVERY food and send one update_foods call with extras.cost for each. Never invent a value of 0 to mean "unknown" — give your best estimate. Combined requests are fine: one update_foods call can set costs and vtags together.`;
+`:''}Only the goals listed above exist — never ask for or invent values for any other metric.
+
+Use update_foods to change values on existing foods, including bulk fills — e.g. "fill in the protein for my library": estimate a realistic per-serving value for EVERY food and send one update_foods call. Never invent a value of 0 to mean "unknown" — give your best estimate.`;
 }
 
 function aiTools(){
+  const vOn=aiVarietyOn();
   const extraProps={};
-  for(const g of S.goals){
-    if(g.id==='cal'||g.type==='count_min'||isVarietyGoal(g)) continue; // variety comes from vtags, not a number
-    extraProps[g.id]={type:'number',description:`${g.name}${g.unit?' in '+g.unit:''} per serving`};
-  }
-  return [{
+  for(const g of aiMetricGoals()) extraProps[g.id]={type:'number',description:`${g.name}${g.unit?' in '+g.unit:''} per serving`};
+  const vtagsProp=vOn?{vtags:{type:'array',items:{type:'string'},description:'1–3 lowercase variety family tags, e.g. ["pizza"] or ["oats","grains"]'}}:{};
+  const tools=[{
     type:'web_search',
   },{
     type:'function',
@@ -3307,11 +3373,12 @@ function aiTools(){
         permanent:{type:'boolean',description:'true = save permanently to the library; false = temporary food for today only (default)'},
         category:{type:'string',enum:S.categories.map(c=>c.id),description:'Tab to place the food in'},
         maxServings:{type:'integer',description:'Max servings per day the solver may use (default 2)'},
-        vtags:{type:'array',items:{type:'string'},description:'1–3 lowercase variety family tags, e.g. ["pizza"] or ["oats","grains"]'},
+        ...vtagsProp,
       },
       required:['name','cal','extras'],
     },
-  },{
+  }];
+  if(vOn) tools.push({
     type:'function',
     name:'set_food_tags',
     description:'Assign variety family tags to existing foods (bulk-capable — use one call for "tag my library").',
@@ -3329,10 +3396,11 @@ function aiTools(){
       },
       required:['tags'],
     },
-  },{
+  });
+  tools.push({
     type:'function',
     name:'update_foods',
-    description:'Update existing foods in bulk: goal metric values, calories, variety tags, or max servings. Use for requests like "fill in costs for my whole library" — estimate values yourself and send one call covering every food. Only include the fields being changed.',
+    description:'Update existing foods in bulk: goal metric values, calories, or max servings. Use for requests like "fill in the protein for my whole library" — estimate values yourself and send one call covering every food. Only include the fields being changed.',
     parameters:{
       type:'object',
       properties:{
@@ -3342,7 +3410,7 @@ function aiTools(){
             food:{type:'string',description:'Food name exactly as listed in the library'},
             cal:{type:'number',description:'New calories per serving'},
             extras:{type:'object',description:'Goal metric values to set (only those changing)',properties:extraProps},
-            vtags:{type:'array',items:{type:'string'},description:'1–3 lowercase family tags'},
+            ...vtagsProp,
             maxServings:{type:'integer'},
           },
           required:['food'],
@@ -3350,7 +3418,8 @@ function aiTools(){
       },
       required:['updates'],
     },
-  }];
+  });
+  return tools;
 }
 
 function aiExecTool(name,args){
