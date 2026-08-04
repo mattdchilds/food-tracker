@@ -111,6 +111,9 @@ select:disabled{opacity:.6;cursor:not-allowed}
 .card.xed.eaten{opacity:.55;filter:grayscale(.4);border-color:var(--bad);background:var(--bad-lt)}
 .card.xed .cname{text-decoration:line-through;text-decoration-color:var(--bad);text-decoration-thickness:2px}
 .hbar{height:3px;width:100%;flex-shrink:0}
+/* Restrictiveness not worked out yet: faint stripes, so it reads as "unknown"
+   rather than as a colour on the red→green scale */
+.hbar.pending{background:repeating-linear-gradient(90deg,var(--border) 0 5px,transparent 5px 10px);opacity:.7}
 .cbody{padding:6px 7px 4px;flex:1;display:flex;flex-direction:column;gap:2px}
 .cname{font-weight:700;font-size:12px;line-height:1.25}
 .cstats{font-size:10px;color:var(--muted);display:flex;gap:5px;flex-wrap:wrap}
@@ -330,6 +333,7 @@ let S = {
   temp:     [],          // day-scoped custom foods (persist in day state; gone next day)
   precomp:  null,
   incFeas:  null,
+  restrict: null,       // {map:{foodId→#foods it rules out}, total, partial, hash}
   excluded: {},
   trackingMode: false,
   relaxSteps: {},       // goalId→# of fixed relaxation steps taken today (see relaxStep)
@@ -340,6 +344,7 @@ let _computing    = false;
 let _worker       = null;
 let _incComputing = false;
 let _incWorker    = null;
+let _restrictWorker = null;
 
 // ═══════════════════════════════════════════════
 //  WEB WORKER  (generalized branch-and-bound)
@@ -347,7 +352,8 @@ let _incWorker    = null;
 const WORKER_CODE = `
 'use strict';
 self.onmessage = function(e) {
-  const {foods, goals, exCals = 0, currentServings = {}, excludedIds = [], variety = null} = e.data;
+  const {foods, goals, exCals = 0, currentServings = {}, excludedIds = [], variety = null,
+         mode = 'feas', budgetMs = 6000} = e.data;
 
   // Locate goals by type
   const calGoal     = goals.find(g => g.id === 'cal');
@@ -500,8 +506,21 @@ self.onmessage = function(e) {
   let done       = false;
   const COUNT_CAP = 1_000_000;
 
+  // Restrictiveness mode pins foods to >=1 serving and asks whether a valid plan
+  // still exists. pinned[i]=1 forces food i in; firstOnly stops at the first
+  // valid plan (all we need for an existence question); deadline caps a single
+  // run so one pathological probe can't stall the sweep.
+  const pinned  = new Uint8Array(n);
+  let firstOnly = false;
+  let deadline  = Infinity;
+  let timedOut  = false;
+  let nodeCount = 0;
+
   function search(i) {
     if (done) return;
+    // Deadline lives here rather than at plan completion: a search that proves
+    // *no* plan exists never completes one, and must still be interruptible.
+    if ((++nodeCount & 4095) === 0 && Date.now() > deadline) { done = true; timedOut = true; return; }
     if (i === n) {
       if (calNow < calMin || calNow > calMax) return;
       for (let k = 0; k < minGoals.length; k++)
@@ -534,7 +553,7 @@ self.onmessage = function(e) {
         if (srv[j] > 0 && !feasBits[j]) { feasBits[j] = 1; feasCount++; }
       }
       planCount++;
-      if (feasCount >= numAddable || planCount >= COUNT_CAP) done = true;
+      if (firstOnly || feasCount >= numAddable || planCount >= COUNT_CAP) done = true;
       return;
     }
 
@@ -546,7 +565,7 @@ self.onmessage = function(e) {
     stSums.set(gSums, base);
     stAvgHW.set(avgHW, base);
 
-    for (let s = 0; s <= maxAdd[i]; s++) {
+    for (let s = (pinned[i] ? 1 : 0); s <= maxAdd[i]; s++) {
       const newCal = prevCal + fCal * s;
       if (newCal > calMax) break;
       if (newCal + remCal < calMin) continue;
@@ -615,6 +634,71 @@ self.onmessage = function(e) {
     srv[i] = 0;
   }
 
+  function runProbe(dl, firstPlanOnly) {
+    feasBits.fill(0); feasCount = 0; planCount = 0; done = false; timedOut = false;
+    deadline = dl; firstOnly = firstPlanOnly;
+  }
+
+  // Which foods can share a valid plan with pin (-1 for none)? Enumerating
+  // plans to find out is hopeless on a loose day — the tree holds astronomically
+  // many plans over the same handful of foods, so coverage crawls. Instead ask
+  // existence questions: find one plan, then for each food still unaccounted for
+  // pin it too and look for one plan containing both. Every probe either marks
+  // at least one more food or proves that food can't join, so this terminates in
+  // at most one probe per food, and each probe stops at its first hit.
+  // Returns {bits, complete} — complete:false means the deadline cut it short.
+  function coverage(pin, candidates, dl) {
+    const bits = new Uint8Array(n);
+    pinned.fill(0);
+    if (pin >= 0) pinned[pin] = 1;
+    runProbe(dl, true);
+    search(0);
+    if (timedOut) return {bits, complete: false};
+    if (!planCount) return {bits, complete: true}; // nothing works at all
+    for (let j = 0; j < n; j++) if (feasBits[j]) bits[j] = 1;
+
+    for (let j = 0; j < n; j++) {
+      if (bits[j] || maxAdd[j] === 0 || (candidates && !candidates[j])) continue;
+      pinned.fill(0);
+      if (pin >= 0) pinned[pin] = 1;
+      pinned[j] = 1;
+      runProbe(dl, true);
+      search(0);
+      if (timedOut) return {bits, complete: false};
+      if (planCount) { for (let k = 0; k < n; k++) if (feasBits[k]) bits[k] = 1; }
+      // else: no plan holds both pin and j — j stays unmarked, which is the answer
+    }
+    pinned.fill(0);
+    return {bits, complete: true};
+  }
+
+  if (mode === 'restrict') {
+    // How much does each food close the day down? Compare what's reachable now
+    // against what's still reachable once that food is locked in.
+    const sweepEnd = Date.now() + budgetMs;
+    const base = coverage(-1, null, sweepEnd);
+    let baseTotal = 0;
+    for (let j = 0; j < n; j++) if (base.bits[j]) baseTotal++;
+    if (!base.complete || !baseTotal) { self.postMessage({mode: 'restrict', restrict: null}); return; }
+
+    const restrict = {};
+    let partial = false;
+    for (let i = 0; i < n; i++) {
+      if (!base.bits[i]) continue;
+      if (Date.now() >= sweepEnd) { partial = true; break; }
+      // Per-food slice of the budget, so one hard food can't eat the whole sweep
+      const c = coverage(i, base.bits, Math.min(sweepEnd, Date.now() + Math.max(200, budgetMs / 12)));
+      // A probe cut short has only found *some* of what still fits alongside i,
+      // so its count would overstate the damage — leave it unknown, not wrong.
+      if (!c.complete) { partial = true; continue; }
+      let lost = 0;
+      for (let j = 0; j < n; j++) if (j !== i && base.bits[j] && !c.bits[j]) lost++;
+      restrict[foods[i].id] = lost;
+    }
+    self.postMessage({mode: 'restrict', restrict, baseTotal, partial});
+    return;
+  }
+
   search(0);
 
   const feasMap = {};
@@ -660,7 +744,29 @@ const IDB = {
 //  FILE SYSTEM  (food-library.json persistence)
 // ═══════════════════════════════════════════════
 let _libFileHandle = null;
+let _lapsedHandle  = null;   // linked file whose permission needs re-granting
+let _reauthMuted   = false;  // "Not now" — don't re-raise the banner this session
 const HAS_FSA = typeof window !== 'undefined' && !!window.showOpenFilePicker;
+
+// localStorage is the source of truth, so what actually protects the user's data
+// is the browser not evicting it. Ask for persistent storage once; Chrome grants
+// it silently to installed PWAs and to sites with engagement, and after that the
+// library survives storage pressure without the file being linked at all.
+let _persisted = null;
+async function initPersistentStorage(){
+  try{
+    if(!navigator.storage || !navigator.storage.persist) return;
+    _persisted = await navigator.storage.persisted();
+    if(!_persisted) _persisted = await navigator.storage.persist();
+  }catch(e){ _persisted = null; }
+}
+
+// True when localStorage alone already holds the user's library — the linked
+// file is then a backup, not the only copy, and losing access to it is not
+// urgent enough to interrupt a launch with.
+function haveLocalLibrary(){
+  return S.custom.length > 0 || Object.keys(S.overrides).length > 0;
+}
 
 function showLibBanner(mode, handle, action){
   const el=document.getElementById('lib-banner');
@@ -677,25 +783,41 @@ function showLibBanner(mode, handle, action){
     // action:'load' = startup (file is source of truth); 'save' = mid-session
     // (in-memory state is newer than the file — write, don't load)
     action=action||'load';
+    if(_reauthMuted){ el.className='hidden'; return; }
     el.className='lib-banner warn';
     el.innerHTML='🔒 Re-authorize library file to '+(action==='save'?'keep your backup up to date':'load your saved food data')+'. &nbsp;'+
       '<button class="btn btn-sm pri" id="lbtn-reauth">Re-authorize</button> '+
+      '<button class="btn btn-sm" id="lbtn-notnow">Not now</button> '+
       '<button class="btn btn-sm" id="lbtn-unlink-b">Unlink File</button>'+
-      '<small style="flex-basis:100%;font-weight:400;opacity:.8">Tip: pick &ldquo;Allow on every visit&rdquo; in the browser prompt and this will never ask again.</small>';
-    document.getElementById('lbtn-reauth').addEventListener('click',async()=>{
-      try{
-        const perm=await handle.requestPermission({mode:'readwrite'});
-        if(perm==='granted'){
-          _libFileHandle=handle;el.className='hidden';
-          if(action==='save'){await writeLibraryFile();}
-          else{await loadLibraryFromFile();render();if(!precompIsValid()&&!_computing)startPrecompute();}
-        }
-      }catch(e){}
+      '<small style="flex-basis:100%;font-weight:400;opacity:.8">Your foods are safe in this browser either way — the file is a backup. '+
+      'Tip: pick &ldquo;Allow on every visit&rdquo; in the browser prompt and this will never ask again.</small>';
+    document.getElementById('lbtn-reauth').addEventListener('click',()=>reauthLibFile(handle,action));
+    document.getElementById('lbtn-notnow').addEventListener('click',()=>{
+      _reauthMuted=true; el.className='hidden';
     });
     document.getElementById('lbtn-unlink-b').addEventListener('click',()=>unlinkLibFile());
   } else {
     el.className='hidden';
   }
+}
+
+// Re-grant readwrite on a lapsed handle. Must be called from a user gesture.
+// action:'load' = the file is the only copy (pull it in); 'save' = memory is
+// newer than the file (push it out).
+async function reauthLibFile(handle, action){
+  try{
+    const perm=await handle.requestPermission({mode:'readwrite'});
+    if(perm!=='granted') return false;
+    _libFileHandle=handle; _lapsedHandle=null; _reauthMuted=false;
+    document.getElementById('lib-banner').className='hidden';
+    if(action==='save'){ await writeLibraryFile(); }
+    else{
+      await loadLibraryFromFile(); render();
+      if(!precompIsValid()&&!_computing) startPrecompute();
+      startIncFeasCompute();
+    }
+    return true;
+  }catch(e){ return false; }
 }
 
 async function initLibFile(){
@@ -718,12 +840,14 @@ async function initLibFile(){
       const perm=await handle.queryPermission({mode:'readwrite'});
       if(perm==='granted'){_libFileHandle=handle;await loadLibraryFromFile();return;}
       // Permission lapsed. Never auto-prompt (the old first-click reauth fired a
-      // surprise browser dialog every session) — show the passive banner and let
-      // the user grant deliberately. Chrome's prompt offers "Allow on every
-      // visit"; once chosen, queryPermission returns 'granted' on future visits
-      // and this banner never appears again. localStorage remains the source of
-      // truth meanwhile, so nothing is lost while unauthorized.
-      showLibBanner('reauth',handle,'load');
+      // surprise browser dialog every session) — and don't nag on launch either.
+      // localStorage is the source of truth; if it already holds the library the
+      // file is only a backup, so remember the lapse quietly and let the user
+      // deal with it in 📚 Library, or when a save actually needs to go out.
+      // Only when this browser has no library of its own is the file the one
+      // copy of the data, and worth interrupting the launch for.
+      _lapsedHandle=handle;
+      if(!haveLocalLibrary()) showLibBanner('reauth',handle,'load');
       return;
     }
   }catch(e){}
@@ -734,7 +858,7 @@ async function pickLibFile(){
   if(!HAS_FSA) return;
   try{
     const [handle]=await window.showOpenFilePicker({types:[{description:'Food Library',accept:{'application/json':['.json']}}]});
-    _libFileHandle=handle;
+    _libFileHandle=handle; _lapsedHandle=null; _reauthMuted=false;
     await IDB.set('libFileHandle',handle);
     const data=await readLibFile(handle);
     if(data) applyLibrary(data);
@@ -749,7 +873,7 @@ async function newLibFile(){
   if(!window.showSaveFilePicker) return;
   try{
     const handle=await window.showSaveFilePicker({types:[{description:'Food Library',accept:{'application/json':['.json']}}],suggestedName:'food-library.json'});
-    _libFileHandle=handle;
+    _libFileHandle=handle; _lapsedHandle=null; _reauthMuted=false;
     await IDB.set('libFileHandle',handle);
     await writeLibraryFile();
     document.getElementById('lib-banner').className='hidden';
@@ -758,7 +882,7 @@ async function newLibFile(){
 }
 
 async function unlinkLibFile(){
-  _libFileHandle=null;
+  _libFileHandle=null; _lapsedHandle=null; _reauthMuted=false;
   try{await IDB.del('libFileHandle');}catch(e){}
   LS.set(lk('lib_dismissed'),false);
   showLibBanner('unlinked');
@@ -816,13 +940,21 @@ document.addEventListener('visibilitychange',()=>{
   }
 });
 async function writeLibraryFile(){
-  if(!_libFileHandle) return;
+  if(!_libFileHandle){
+    // A linked-but-lapsed file plus an actual change to write: this, not launch,
+    // is the moment the permission is worth asking about.
+    if(_lapsedHandle) showLibBanner('reauth',_lapsedHandle,'save');
+    return;
+  }
   try{
     // Background saves must never trigger a permission prompt (mobile Chrome
     // doesn't persist the grant and would re-prompt on every write) — if not
     // granted, show the reauth banner and let the user grant via a gesture.
     const perm=await _libFileHandle.queryPermission({mode:'readwrite'});
-    if(perm!=='granted'){showLibBanner('reauth',_libFileHandle,'save');return;}
+    if(perm!=='granted'){
+      _lapsedHandle=_libFileHandle; _libFileHandle=null;
+      showLibBanner('reauth',_lapsedHandle,'save');return;
+    }
     const lib={version:1,goals:S.goals,overrides:S.overrides,custom:S.custom,exercisePresets:S.exercisePresets,categories:S.categories};
     const w=await _libFileHandle.createWritable();
     await w.write(JSON.stringify(lib,null,2));
@@ -987,6 +1119,31 @@ function getHealthMetric(f){
   const g = S.goals.find(g=>g.id==='health'&&(g.type==='avg_min'||g.type==='avg_max'))
          || S.goals.find(g=>g.type==='avg_min'||g.type==='avg_max');
   return g ? Math.max(0, Math.min(1, getMetric(f, g))) : 0.5;
+}
+
+// What the colour strip on top of each food card means: the food's health
+// score, or how much of the rest of the day picking it would close off.
+function barMode(){ return LS.get(lk('barMode'), 'restrict') === 'health' ? 'health' : 'restrict'; }
+function cardBarHtml(f){
+  if(barMode() === 'restrict'){
+    const r = restrictInfo(f);
+    if(r){
+      const label = r.lost === 0
+        ? `Rules out nothing — every other food is still on the table`
+        : `Rules out ${r.lost} of the ${r.denom} other food${r.denom===1?'':'s'} you could still add today`;
+      return `<div class="hbar" style="background:${healthColor(1-r.frac)}" title="${label}"></div>`;
+    }
+    const R = S.restrict;
+    const settled = R && R.hash === incFeasHash();
+    const title = servingsOf(f.id) >= maxServingsOf(f.id)
+      ? 'Already at today’s limit for this food'
+      : !settled ? 'Working out how much this closes off…'
+      : R.partial ? 'Too many combinations to work this one out'
+      : 'Doesn’t fit today, so there’s nothing left for it to rule out';
+    return `<div class="hbar pending" title="${title}"></div>`;
+  }
+  const h = getHealthMetric(f);
+  return `<div class="hbar" style="background:${healthColor(h)}" title="Health score ${h.toFixed(2)}"></div>`;
 }
 
 function getProGoal(){
@@ -1408,6 +1565,7 @@ function incFeasHash(){
 function startIncFeasCompute(){
   cancelIncFeas();
   S.incFeas = null;
+  startRestrictCompute(); // same triggers, but it runs from an empty day too
 
   if(!hasEaten()) return; // empty state: precomp (or DP) handles it
 
@@ -1431,6 +1589,53 @@ function startIncFeasCompute(){
     excludedIds: Object.keys(S.excluded),
     variety: varietyWorkerCtx(goals)
   });
+}
+
+// ═══════════════════════════════════════════════
+//  RESTRICTIVENESS  (how much each food closes the day down)
+// ═══════════════════════════════════════════════
+// One worker run sweeps every addable food, pinning it to >=1 serving and
+// re-enumerating, so `restrict[id]` is the exact number of other still-reachable
+// foods that choosing it would rule out. Keyed to incFeasHash() like incFeas —
+// anything that changes feasibility invalidates it.
+function cancelRestrict(){ if(_restrictWorker){_restrictWorker.terminate();_restrictWorker=null;} }
+function startRestrictCompute(){
+  cancelRestrict();
+  S.restrict = null;
+  if(barMode() !== 'restrict') return;
+
+  const hash = incFeasHash();
+  _restrictWorker = spawnWorker(
+    ev => {
+      _restrictWorker = null;
+      if(incFeasHash() !== hash){ startRestrictCompute(); return; } // state moved on
+      S.restrict = {map: ev.data.restrict || {}, total: ev.data.baseTotal || 0,
+                    partial: !ev.data.restrict || !!ev.data.partial, hash};
+      render();
+    },
+    err => { console.error('Restrict worker error:',err); _restrictWorker=null; }
+  );
+  const goals=effGoals();
+  _restrictWorker.postMessage({
+    mode: 'restrict',
+    foods: allFoods().map(f=>({...f,_cat:getFoodCategory(f),_vt:vtagsOf(f)})),
+    goals,
+    exCals: S.exCals,
+    currentServings: S.servings,
+    excludedIds: Object.keys(S.excluded),
+    variety: varietyWorkerCtx(goals)
+  });
+}
+
+// null = not known yet (still computing, or this food's probe was cut short).
+// frac is 0 for "rules nothing out" .. 1 for "rules out everything else".
+function restrictInfo(f){
+  const R = S.restrict;
+  if(!R || R.hash !== incFeasHash()) return null;
+  const lost = R.map[f.id];
+  if(typeof lost !== 'number') return null;
+  const denom = Math.max(1, (R.total||1) - 1);
+  return {lost, denom, frac: Math.min(1, lost/denom)};
 }
 
 // ═══════════════════════════════════════════════
@@ -2177,7 +2382,7 @@ function makeCard(f, feas, ppcRange, relaxCache, repeatTags){
   const rptHtml=rptTag?`<span class="rpt" title="'${esc(rptTag)}' is already ${Math.round(varietyCfg().topPct)}%+ of this week's servings — consider some variety">🔁</span>`:'';
 
   div.innerHTML=`
-    <div class="hbar" style="background:${healthColor(getHealthMetric(f))}"></div>
+    ${cardBarHtml(f)}
     <div class="cbody">
       <div class="cname">${f.name}${rptHtml}</div>
       <div class="cstats">${statsHtml}</div>
@@ -2631,12 +2836,30 @@ function openSettings(){
     </div>`;
   }).join('');
 
+  const bm=barMode();
   openModal(`<h2>⚙ Goals</h2>
-    <div class="sec-lbl">ACTIVE GOALS</div>
+    <div class="sec-lbl">CARD COLOUR BAR</div>
+    <div class="goal-row">
+      <div class="goal-info">
+        <span class="goal-name">${bm==='restrict'?'How much it closes off':'Health score'}</span>
+        <span class="goal-params">${bm==='restrict'
+          ? 'Green = picking it rules out nothing; red = it rules out most of what you could still eat'
+          : 'Green = high health score, red = low'}</span>
+      </div>
+      <div class="goal-actions">
+        <button class="btn btn-sm" id="btn-bar-mode">Show ${bm==='restrict'?'health':'restrictiveness'}</button>
+      </div>
+    </div>
+    <div class="sec-lbl" style="margin-top:14px">ACTIVE GOALS</div>
     <div id="goals-list" style="margin-bottom:14px">${goalRows}</div>
     <button class="btn pri" id="btn-add-goal">＋ Add Goal</button>
     <div class="mactions"><button type="button" class="btn btn-cancel">Close</button></div>`);
 
+  document.getElementById('btn-bar-mode').addEventListener('click',()=>{
+    LS.set(lk('barMode'), bm==='restrict' ? 'health' : 'restrict');
+    startIncFeasCompute(); // starts (or cancels) the restrictiveness sweep
+    render(); closeModal(); openSettings();
+  });
   document.getElementById('btn-add-goal').addEventListener('click',()=>{
     closeModal();
     openGoalEditModal(null, g=>{
@@ -2937,15 +3160,26 @@ function openLibraryModal(){
       </div>
     </div>`).join('') || '<div class="empty" style="padding:8px 0">No archived foods.</div>';
 
+  const storeLine = _persisted===true
+    ? `<div style="color:var(--ok);font-size:11px;margin-bottom:4px">✓ Storage is persistent — this browser won't evict your foods</div>`
+    : _persisted===false
+      ? `<div style="color:var(--muted);font-size:11px;margin-bottom:4px">ℹ Storage is best-effort. Install this app to your home screen and the browser will keep it permanently.</div>`
+      : '';
+
   const fileLine = _libFileHandle
     ? `<div style="color:var(--ok);font-size:11px;margin-bottom:10px">✓ Linked to library file — changes save automatically</div>`
-    : HAS_FSA
-      ? `<div style="color:var(--warn);font-size:11px;margin-bottom:10px">⚠ No library file linked — data is browser-only</div>`
-      : `<div style="color:var(--muted);font-size:11px;margin-bottom:10px">ℹ Auto file-sync isn't supported on this browser — use Export/Import JSON to back up or transfer</div>`;
+    : _lapsedHandle
+      ? `<div style="color:var(--warn);font-size:11px;margin-bottom:10px">🔒 Library file linked but not authorized this session — your foods are safe here; the file backup is just paused</div>`
+      : HAS_FSA
+        ? `<div style="color:var(--warn);font-size:11px;margin-bottom:10px">⚠ No library file linked — data is browser-only</div>`
+        : `<div style="color:var(--muted);font-size:11px;margin-bottom:10px">ℹ Auto file-sync isn't supported on this browser — use Export/Import JSON to back up or transfer</div>`;
 
   const fsaBtns = HAS_FSA
     ? (_libFileHandle
       ?`<button class="btn btn-sm" id="lbtn-unlink2">Unlink File</button>`
+      : _lapsedHandle
+      ?`<button class="btn btn-sm pri" id="lbtn-reauth2">Re-authorize File</button>
+        <button class="btn btn-sm" id="lbtn-unlink2">Unlink File</button>`
       :`<button class="btn btn-sm pri" id="lbtn-open2">Open Library File</button>
         <button class="btn btn-sm" id="lbtn-new2">Create New File</button>`)
     : '';
@@ -2956,7 +3190,7 @@ function openLibraryModal(){
   </div>`;
 
   openModal(`<h2>📚 Food Library</h2>
-    ${fileLine}${fileBtns}
+    ${storeLine}${fileLine}${fileBtns}
     <div class="sec-lbl">ACTIVE FOODS (${active.length})</div>
     <div style="margin-bottom:16px">${activeRows}</div>
     <div class="sec-lbl">ARCHIVED (${archived.length})</div>
@@ -2966,6 +3200,11 @@ function openLibraryModal(){
   document.getElementById('lbtn-open2')?.addEventListener('click',async()=>{await pickLibFile();closeModal();openLibraryModal();});
   document.getElementById('lbtn-new2')?.addEventListener('click',async()=>{await newLibFile();closeModal();openLibraryModal();});
   document.getElementById('lbtn-unlink2')?.addEventListener('click',async()=>{await unlinkLibFile();closeModal();openLibraryModal();});
+  document.getElementById('lbtn-reauth2')?.addEventListener('click',async()=>{
+    // Memory is the newer copy unless this browser has nothing of its own
+    await reauthLibFile(_lapsedHandle, haveLocalLibrary()?'save':'load');
+    closeModal(); openLibraryModal();
+  });
   document.getElementById('lbtn-export')?.addEventListener('click',exportLibraryJSON);
   document.getElementById('lbtn-import')?.addEventListener('click',importLibraryJSON);
 
@@ -3680,6 +3919,8 @@ render();
 if(!precompIsValid()&&!_computing) startPrecompute();
 // If foods were already eaten in the restored state, kick off incremental feasibility
 startIncFeasCompute();
+// Ask the browser to keep our storage — localStorage is the source of truth
+initPersistentStorage();
 // Async: attempt to link library file (may reload library data from file)
 initLibFile().then(()=>{
   render();

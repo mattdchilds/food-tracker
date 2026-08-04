@@ -1,2 +1,0 @@
--It asks me to relink the json every time I launch the app - I feel like its using an outdated storage method, my other vibe coded app remembers stuff without needing to reload every time
--IF POSSIBLE: The banner at the top that shows health from red to green, if possible change to "how restrictive it makes the rest of the day", or "how many foods choosing this disables"

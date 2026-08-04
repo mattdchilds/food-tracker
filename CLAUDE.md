@@ -51,12 +51,43 @@ property to the AI's tool schema — that coupling is the point, and it's why
 parking unused goals (below) matters.
 
 **The solver** is a branch-and-bound enumerator whose source is the
-`WORKER_CODE` string, spawned via blob URL. Three call sites: `precompute`
+`WORKER_CODE` string, spawned via blob URL. Four call sites: `precompute`
 (which foods can start a plan), `startIncFeasCompute` (which foods can still be
-added given what's eaten), and `exactFeasWithGoals` (one-off probes for the
-relax search). Results are cached against `precompHash()` / `incFeasHash()` —
-if you add anything that changes feasibility, fold it into those hashes or you'll
-serve stale plans.
+added given what's eaten), `startRestrictCompute` (`mode:'restrict'`, below),
+and `exactFeasWithGoals` (one-off probes for the relax search). Results are
+cached against `precompHash()` / `incFeasHash()` — if you add anything that
+changes feasibility, fold it into those hashes or you'll serve stale plans.
+
+Note `WORKER_CODE` is a **template literal**: a stray backtick or `${` anywhere
+inside it (a comment is enough) ends the string and the whole app fails to parse.
+
+## The card colour bar
+
+The strip across the top of each food card answers one of two questions, chosen
+in ⚙ Goals and stored in `LS lk('barMode')` (default `'restrict'`):
+
+- `'health'` — the food's health metric, the original behaviour.
+- `'restrict'` — **how much of the rest of the day picking it closes off**:
+  the number of currently-reachable foods that would no longer fit. Green rules
+  out nothing, red rules out nearly everything. `cardBarHtml(f)` renders it.
+
+`restrict[id]` is exact, not a heuristic, and it counts *other* foods — a food
+ruling out a second serving of itself isn't included.
+
+Computing it by enumeration doesn't work: on a loose day the tree holds
+astronomically many plans over the same handful of foods, so a 1M-plan budget
+covered only 21 of 90 foods. The worker's `coverage(pin, candidates, dl)` asks
+**existence** questions instead — find one valid plan, then for each food still
+unaccounted for pin it as well and look for one plan containing both. Every
+probe either marks at least one more food or proves that food can't join, so it
+terminates in at most one probe per food and each probe stops at its first hit.
+`pinned[]` forces foods to ≥1 serving, `firstOnly` stops at the first plan, and
+the deadline is checked per *node* (a probe that proves no plan exists never
+completes one, so a plan-completion check would never fire).
+
+A probe cut short by the deadline reports **nothing** for that food rather than
+an undercount — the bar stays striped (`.hbar.pending`) and `partial` is set.
+Keep that property: a truncated coverage set would silently overstate the damage.
 
 ## Relaxation steps and the score  (the app's central idea)
 
@@ -123,10 +154,20 @@ edit instead of dropping it.
   (goals/overrides/custom/categories), per-day state (`day_YYYY-MM-DD`), `hist`,
   `precomp`.
 - **IndexedDB** (`mpv7-lib`) stores only the File System Access handle.
+- `initPersistentStorage()` requests `navigator.storage.persist()` once at
+  launch. Since localStorage *is* the data, this — not the linked file — is what
+  actually keeps it safe; browsers grant it to installed PWAs. The Library modal
+  reports the result (`_persisted`).
 - The linked `food-library.json` is a backup mirror, written fire-and-forget on
-  every `saveState()`. Permission can lapse between sessions; the app shows a
-  passive re-authorize banner rather than auto-prompting (a surprise browser
-  dialog every launch was worse). Chrome's "Allow on every visit" makes it stop.
+  every `saveState()`. Permission can lapse between sessions; the app never
+  auto-prompts (a surprise browser dialog every launch was worse).
+- **Don't nag about a lapsed file permission.** A lapse parks the handle in
+  `_lapsedHandle` (not `_libFileHandle`, so no write is attempted). At launch it
+  is *silent* unless `haveLocalLibrary()` is false — only then is the file the
+  one copy of the data and worth interrupting for. The banner otherwise appears
+  when `writeLibraryFile()` has an actual change to push out, carries a "Not now"
+  (`_reauthMuted`, session-scoped), and the status plus a Re-authorize button
+  live in 📚 Library. `reauthLibFile(handle, action)` is the one re-grant path.
 - Day state is ephemeral by design: `servings`, `exCals`, `excluded`,
   `trackingMode`, `relaxSteps`, `relaxScore`, `temp` foods.
 
