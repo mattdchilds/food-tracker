@@ -105,8 +105,12 @@ A goal is never relaxed by a bespoke number. Every goal has a **fixed step**
   double-count — don't.
 - `S.relaxScore` is the day's score: total steps taken, cumulative. **0 is a
   perfect day.** "Restore goals" clears `relaxSteps` but not the score.
-- `weekRelaxScore()` sums the window's days plus today — the only weekly number
-  the UI shows.
+- The score is read **per day**, not as a running total: `weekRelaxDays()` gives
+  the window's days oldest→newest with each day's score, the week strip prints
+  that number inside each day's pip, and `weekRelaxAvg()` — the one weekly figure
+  the UI leads with — is their rolling mean. `weekRelaxScore()` still sums them
+  but is now only the tooltip's supporting number. `relaxTone(n)` is the shared
+  green / amber / red ladder (0 / 1–2 / 3+) for pips and the average chip.
 
 Two paths produce a relaxation, both returning `{goalId: totalSteps}`:
 

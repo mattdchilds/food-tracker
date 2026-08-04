@@ -48,10 +48,13 @@ button,.card,.preset-chip,.cmp-card{touch-action:manipulation}
 .week-strip .over{color:var(--bad)}
 .week-strip .over b{color:var(--bad)}
 .week-dots{display:inline-flex;gap:4px;align-items:center}
-.week-dot{width:10px;height:10px;border-radius:50%;background:var(--border)}
-.week-dot.q{background:var(--ok)}
-.week-dot.t{background:var(--primary)}
+.week-dot{display:inline-flex;align-items:center;justify-content:center;min-width:17px;height:17px;padding:0 3px;border-radius:9px;background:var(--border);color:#0f172a;font-size:10px;font-weight:800;line-height:1}
+.week-dot.rx0{background:var(--ok)}
+.week-dot.rx1{background:var(--warn)}
+.week-dot.rx2{background:var(--bad);color:#fff}
+.week-dot.t{box-shadow:0 0 0 2px var(--primary)}
 .week-strip .ok{color:var(--ok)} .week-strip .ok b{color:var(--ok)}
+.week-strip .warn{color:var(--warn)} .week-strip .warn b{color:var(--warn)}
 .wk-var{cursor:pointer}
 .rpt{font-size:10px;opacity:.65;margin-left:3px;cursor:default}
 .preset-chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;min-height:32px}
@@ -1354,14 +1357,37 @@ function weekWindowDates(){
   return dates;
 }
 
-// The week's only score: relaxation steps taken across the window's tracked
-// days plus today. 0 = every day finished inside its configured goals.
-function weekRelaxScore(){
+// The window's days oldest→newest (today last), each with the relaxation steps
+// that day took. The score is per-day: 0 is a perfect day, and the week is read
+// as the rolling average of these, not as a running total (a total only grows,
+// so it says nothing about whether the days are getting better).
+function weekRelaxDays(){
   const today=todayStr();
-  let n=0;
-  for(const d of weekWindowDates()) n += d===today ? (S.relaxScore||0) : (HIST[d]?.relaxScore||0);
-  return n;
+  return weekWindowDates().reverse().map(d=>({
+    date : d,
+    today: d===today,
+    score: d===today ? (S.relaxScore||0) : (HIST[d]?.relaxScore||0),
+    pct  : d===today ? null : (HIST[d]?.completionPct||0)
+  }));
 }
+
+// Mean steps per day across the window (today included, still in progress).
+// 0 = every day finished inside its configured goals.
+function weekRelaxAvg(){
+  const days=weekRelaxDays();
+  if(!days.length) return 0;
+  return days.reduce((n,d)=>n+d.score,0)/days.length;
+}
+
+// Total steps across the window — the tooltip's supporting number now that the
+// average is what the strip leads with.
+function weekRelaxScore(){
+  return weekRelaxDays().reduce((n,d)=>n+d.score,0);
+}
+
+// Shared ladder for the day pips and the average chip: a perfect day is green,
+// the expected one-or-two-goal day is amber, and three-plus stands out.
+function relaxTone(n){ return n<=0 ? 0 : n<=2 ? 1 : 2; }
 
 function histSpend(rec, g){
   const foods = histFoodMap(rec.temp);
@@ -2065,16 +2091,15 @@ function render(){
 // ── Week strip: qualifying-day dots + weekly budgets ──
 function renderWeekStrip(st){
   const el=document.getElementById('week-strip');
-  const today=todayStr();
-  const dates=weekWindowDates(); // newest first, includes today
-  const past=dates.length-1;
+  const days=weekRelaxDays(); // oldest first, today last
+  const past=days.length-1;
+  // Each pip carries that day's relaxation score, so the week reads as a run of
+  // daily results rather than one accumulated number.
   let dots='';
-  for(let i=dates.length;i<7;i++) dots+='<span class="week-dot" title="No qualifying day yet"></span>';
-  for(let i=dates.length-1;i>=0;i--){
-    const d=dates[i];
-    dots+=d===today
-      ?`<span class="week-dot t" title="Today (in progress) — ${S.relaxScore||0} relax step${S.relaxScore===1?'':'s'}"></span>`
-      :`<span class="week-dot q" title="${d} — tracked to ${Math.round((HIST[d]?.completionPct||0)*100)}%, ${HIST[d]?.relaxScore||0} relax step${HIST[d]?.relaxScore===1?'':'s'}"></span>`;
+  for(let i=days.length;i<7;i++) dots+='<span class="week-dot" title="No qualifying day yet"></span>';
+  for(const d of days){
+    const steps=`${d.score} relax step${d.score===1?'':'s'}`;
+    dots+=`<span class="week-dot rx${relaxTone(d.score)}${d.today?' t':''}" title="${d.today?`Today (in progress) — ${steps} so far`:`${d.date} — tracked to ${Math.round(d.pct*100)}%, ${steps}`}">${d.score}</span>`;
   }
   let budgets='';
   for(const g of S.goals){
@@ -2096,8 +2121,9 @@ function renderWeekStrip(st){
     if(vdOn) variety+=`<span class="wk-var${vs.distinct<need?' over':(vs.distinct>=vc.minTags?' ok':'')}" id="wk-var-div" title="Distinct food families eaten this week — aim for at least ${vc.minTags}. Enforced: the planner requires ${need} by today (ramps up over the week). Click to edit variety goals.">🎨 <b>${vs.distinct}</b>/${vc.minTags} families</span>`;
     if(vrOn) variety+=`<span class="wk-var${topOver?' over':(vs.total?' ok':'')}" id="wk-var-top" title="Biggest food family's share of the week's servings — keep it at or under ${vc.topPct}%. Enforced once a family has ${REPEAT_FLOOR}+ servings. Click to edit variety goals.">🔁 ${vs.topTag?`${esc(vs.topTag)} <b>${topPct}%</b>`:'—'} (≤${vc.topPct}%)</span>`;
   }
-  const wkScore=weekRelaxScore();
-  const score=`<span class="${wkScore?'over':'ok'}" title="Goal-relaxation steps taken across the window's tracked days plus today. 0 is a clean week; each step is one predetermined rung of slack on one goal.">🔓 <b>${wkScore}</b> relax step${wkScore===1?'':'s'} this week</span>`;
+  const wkAvg=weekRelaxAvg(), wkScore=weekRelaxScore();
+  const avgTxt=Math.round(wkAvg*10)/10;
+  const score=`<span class="${['ok','warn','over'][relaxTone(wkAvg)]}" title="Rolling average of the daily relaxation scores across the window's ${days.length} day${days.length===1?'':'s'} (${wkScore} step${wkScore===1?'':'s'} in total, today included while still in progress). 0 is a perfect day; each step is one predetermined rung of slack on one goal.">🔓 <b>${avgTxt}</b> relax steps/day avg</span>`;
   el.innerHTML=`<span title="Days tracked to ≥${Math.round(QUALIFY_PCT*100)}% of goals count toward the week; untracked days are skipped">📅 Week</span>
     <span class="week-dots">${dots}</span>
     <span>${past} tracked day${past===1?'':'s'} + today</span>
