@@ -1157,22 +1157,23 @@ function proteinPerCal(f){
   if(!pg||f.cal<=0) return 0;
   return getMetric(f,pg)/f.cal;
 }
-// Call once per render; returns {min, max} across all foods
+// Call once per render; returns {min, max} across all foods.
+// Uses the 10th–90th percentiles rather than the raw extremes so one outlier
+// food (very high or zero protein) can't compress everyone else's colour.
 function computePPCRange(foods){
-  let mn=Infinity, mx=-Infinity;
-  for(const f of foods){
-    const v=proteinPerCal(f);
-    if(v<mn) mn=v;
-    if(v>mx) mx=v;
-  }
-  if(mn===Infinity) return {min:0,max:0};
-  return {min:mn, max:mx};
+  const vals=foods.map(proteinPerCal).sort((a,b)=>a-b);
+  if(!vals.length) return {min:0,max:0};
+  const pct=p=>{
+    const i=(vals.length-1)*p, lo=Math.floor(i), hi=Math.ceil(i);
+    return vals[lo]+(vals[hi]-vals[lo])*(i-lo);
+  };
+  return {min:pct(.10), max:pct(.90)};
 }
 function proCalColor(f, ppcRange){
   const {min,max}=ppcRange;
   const v=proteinPerCal(f);
   if(max<=min) return healthColor(0.5);
-  return healthColor((v-min)/(max-min));
+  return healthColor(Math.max(0,Math.min(1,(v-min)/(max-min))));
 }
 
 // ═══════════════════════════════════════════════
