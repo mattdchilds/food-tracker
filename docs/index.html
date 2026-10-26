@@ -717,12 +717,27 @@ self.onmessage = function(e) {
 const LS = {
   get(k,d){try{const v=localStorage.getItem(k);return v===null?d:JSON.parse(v)}catch{return d}},
   set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}},
+  del(k){try{localStorage.removeItem(k)}catch{}},
 };
 const PFX = 'mpv7_';
 function lk(k){return PFX+k;}
-function todayStr(){return new Date().toISOString().slice(0,10);}
-function dateStrDaysAgo(n){return new Date(Date.now()-n*864e5).toISOString().slice(0,10);}
-function todayKey(){return lk('day_'+todayStr());}
+// Dates are LOCAL calendar days (the old UTC keys flipped the day mid-evening
+// in western time zones). addDays works on the 'YYYY-MM-DD' string in UTC so
+// DST never shifts a date.
+function localDateStr(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function addDays(ds,n){return new Date(Date.parse(ds+'T00:00:00Z')+n*864e5).toISOString().slice(0,10);}
+// "End day" moves the day boundary forward: while the real date is still
+// `from`, the app lives on `to` (yesterday finalizes into HIST as usual and new
+// entries go to the next slate). The shift expires on its own once the real
+// date catches up.
+function todayStr(){
+  const real=localDateStr(new Date());
+  const sh=LS.get(lk('dayShift'),null);
+  return (sh&&sh.from===real&&sh.to>real) ? sh.to : real;
+}
+function dateStrDaysAgo(n){return addDays(todayStr(),n>0?-n:0);}
+function dayKeyFor(ds){return lk('day_'+ds);}
+function todayKey(){return dayKeyFor(todayStr());}
 
 // ═══════════════════════════════════════════════
 //  INDEXEDDB  (stores file handle across sessions)
@@ -941,7 +956,13 @@ document.addEventListener('visibilitychange',()=>{
   if(document.visibilityState==='hidden'&&_libSaveTimer){
     clearTimeout(_libSaveTimer);_libSaveTimer=null;writeLibraryFile();
   }
+  if(document.visibilityState==='visible' && rolloverIfNeeded()) render();
 });
+// A PWA parked in the background for days resumes with stale in-memory state;
+// check the calendar on every path back to the foreground, plus once a minute.
+window.addEventListener('focus',()=>{ if(rolloverIfNeeded()) render(); });
+window.addEventListener('pageshow',()=>{ if(rolloverIfNeeded()) render(); });
+setInterval(()=>{ if(rolloverIfNeeded()) render(); }, 60000);
 async function writeLibraryFile(){
   if(!_libFileHandle){
     // A linked-but-lapsed file plus an actual change to write: this, not launch,
@@ -1012,7 +1033,29 @@ function loadState(){
   S.categories       = Array.isArray(savedCats) ? savedCats : DEF_CATEGORIES.map(c=>({...c}));
   S.sort             = LS.get(lk('sort'), 'name');
   // Daily state stays in localStorage (ephemeral)
-  const day   = LS.get(todayKey(), {servings:{}, exCals:0, excluded:{}, trackingMode:false});
+  loadDayState();
+  HIST = LS.get(lk('hist'), {}) || {};
+  _histDay = null; _trailCache = null;
+  ensureHistory();   // finalize any past day keys into HIST
+  loadPrecomp();
+}
+
+// Load (or start) the slate for the current day. S.dayDate pins which key the
+// in-memory state belongs to, so a day left open past midnight is saved back
+// under ITS date rather than leaking into the next one (the old "today never
+// reset" bug).
+function loadDayState(){
+  const today = todayStr();
+  // One-time migration from UTC day keys: an evening's entries may sit under
+  // tomorrow's date. Adopt them as today if today has nothing of its own.
+  if(LS.get(dayKeyFor(today), null)===null){
+    const re = new RegExp('^'+PFX+'day_(\\d{4}-\\d{2}-\\d{2})$');
+    const keys=[]; try{ for(let i=0;i<localStorage.length;i++) keys.push(localStorage.key(i)); }catch{}
+    const future = keys.map(k=>k&&k.match(re)).filter(m=>m&&m[1]>today).map(m=>m[1]).sort();
+    if(future.length){ LS.set(dayKeyFor(today), LS.get(dayKeyFor(future[0]),{})); for(const d of future) LS.del(dayKeyFor(d)); }
+  }
+  const day   = LS.get(dayKeyFor(today), {servings:{}, exCals:0, excluded:{}, trackingMode:false});
+  S.dayDate      = today;
   S.servings     = day.servings     || {};
   S.exCals       = day.exCals       || 0;
   S.excluded     = day.excluded     || {};
@@ -1020,10 +1063,21 @@ function loadState(){
   S.relaxSteps   = day.relaxSteps   || {};
   S.relaxScore   = day.relaxScore   || 0;
   S.temp         = Array.isArray(day.temp) ? day.temp : [];
-  HIST = LS.get(lk('hist'), {}) || {};
-  _histDay = null; _trailCache = null;
-  ensureHistory();   // finalize any past day keys into HIST
-  loadPrecomp();
+}
+
+// Called from render() and whenever the app regains the foreground: if the
+// calendar (or an "End day") moved on while the state was loaded, park the old
+// day under its own key and start the new one fresh. Returns true on a switch.
+function rolloverIfNeeded(){
+  if(!S.dayDate || S.dayDate===todayStr()) return false;
+  saveDayState();                 // old day, under its own key
+  cancelIncFeas(); cancelRelaxSearch();
+  S.incFeas=null; _autoRelaxHash=null; _autoUnrelaxHash=null;
+  loadDayState();
+  const ex=document.getElementById('ex-input'); if(ex) ex.value=S.exCals?String(S.exCals):'';
+  _histDay=null; ensureHistory();   // folds the finished day into HIST
+  startIncFeasCompute();
+  return true;
 }
 
 function saveState(){
@@ -1040,7 +1094,7 @@ function saveState(){
   saveLibraryToFile();
 }
 function saveDayState(){
-  LS.set(todayKey(), {servings:S.servings, exCals:S.exCals, excluded:S.excluded, trackingMode:S.trackingMode, relaxSteps:S.relaxSteps||{}, relaxScore:S.relaxScore||0, temp:S.temp||[]});
+  LS.set(dayKeyFor(S.dayDate||todayStr()), {servings:S.servings, exCals:S.exCals, excluded:S.excluded, trackingMode:S.trackingMode, relaxSteps:S.relaxSteps||{}, relaxScore:S.relaxScore||0, temp:S.temp||[]});
 }
 
 // ═══════════════════════════════════════════════
@@ -1270,9 +1324,10 @@ function finalizeHistory(){
     const m = k && k.match(re);
     if(!m) continue;
     const date = m[1];
-    if(date >= today || HIST[date]) continue;
+    if(date >= today) continue;
     const day = LS.get(k, null);
-    if(!day || typeof day !== 'object') continue;
+    LS.del(k); // folded once; a stale key would otherwise shadow HIST forever
+    if(HIST[date] || !day || typeof day !== 'object') continue;
     HIST[date] = {
       servings: day.servings || {},
       temp: Array.isArray(day.temp) ? day.temp : [],
@@ -2077,7 +2132,8 @@ function foodStatsHtml(f, {names=false, ppcRange=null}={}){
 //  RENDER
 // ═══════════════════════════════════════════════
 function render(){
-  ensureHistory(); // catches midnight rollover while the app stays open
+  rolloverIfNeeded(); // the calendar (or "End day") moved on while the app stayed open
+  ensureHistory();
   const st = computeStats();
   const feas = computeFeasibility();
   renderTrackingBanner();
@@ -2131,8 +2187,10 @@ function renderWeekStrip(st){
     ${score}
     ${budgets}
     ${variety}
-    <button class="btn btn-sm" id="btn-reset-week" style="margin-left:auto" title="Start the weekly window fresh from today">⟳ Reset week</button>`;
+    <button class="btn btn-sm" id="btn-end-day" style="margin-left:auto" title="Finalize today into the week now and start tomorrow's slate (happens on its own at midnight)">⏹ End day</button>
+    <button class="btn btn-sm" id="btn-reset-week" title="Start the weekly window fresh from today">⟳ Reset week</button>`;
   document.getElementById('btn-reset-week').addEventListener('click',resetWeek);
+  document.getElementById('btn-end-day').addEventListener('click',endDayNow);
   document.getElementById('wk-var-div')?.addEventListener('click',openVarietyModal);
   document.getElementById('wk-var-top')?.addEventListener('click',openVarietyModal);
 }
@@ -2231,6 +2289,12 @@ function renderBanner(st){
       return;
     }
   }
+  // The day CAN finish and some goals are relaxed → quietly try to tighten them
+  // back. A truncated result with count>0 still proves feasibility (a found plan
+  // is a found plan), so truncation doesn't gate this the way it gates the DP.
+  if(S.incFeas && S.incFeas.hash===incFeasHash() && S.incFeas.count>0 && totalSteps(S.relaxSteps)>0){
+    autoUnrelax();
+  }
   banner.className='hidden';
   banner.textContent='';
 }
@@ -2304,19 +2368,20 @@ function goalsWithSteps(steps){
 }
 function effGoals(){ return goalsWithSteps(S.relaxSteps||{}); }
 
-// Applies a {goalId: totalSteps} relaxation and charges the day's score for
-// whatever it added. Steps never decrease here — "Restore goals" clears them,
-// but the score it already cost stays on the books.
+// Applies a {goalId: totalSteps} relaxation. Steps never decrease here —
+// autoUnrelax() / "Restore goals" take them back — and the day's score is the
+// HIGH-WATER MARK of total steps held at once, so loosening, tightening and
+// loosening again doesn't charge the same rung twice, while a rung once needed
+// stays on the books even after it's given back.
 function applyRelaxSteps(steps){
   const next={...(S.relaxSteps||{})};
-  let added=0;
   for(const [gid,n] of Object.entries(steps)){
-    const cur=next[gid]||0;
-    if(n>cur){ added+=n-cur; next[gid]=n; }
+    if(n>(next[gid]||0)) next[gid]=n;
   }
   S.relaxSteps=next;
-  S.relaxScore=(S.relaxScore||0)+added;
+  S.relaxScore=Math.max(S.relaxScore||0, totalSteps(next));
 }
+function totalSteps(steps){ return Object.values(steps||{}).reduce((a,b)=>a+(b||0),0); }
 
 function goalLabel(g){
   const n=stepsOf(g);
@@ -2554,10 +2619,11 @@ function enterTrackingMode(){
 const RELAX_LADDER=[1,2,3,5,8,13];
 let _relaxWorker=null, _relaxResolve=null, _relaxSearchTok=null;
 let _autoRelaxHash=null, _autoRelaxFailed=false; // see autoRelax()
+let _autoUnrelaxHash=null; // see autoUnrelax()
 
 function cancelRelaxSearch(){
   _relaxSearchTok=null;
-  _autoRelaxHash=null; // a cancelled auto-relax should retry on the next render
+  _autoRelaxHash=null; _autoUnrelaxHash=null; // a cancelled auto-relax/unrelax should retry on the next render
   if(_relaxWorker){_relaxWorker.terminate();_relaxWorker=null;}
   if(_relaxResolve){const r=_relaxResolve;_relaxResolve=null;r(null);}
 }
@@ -2749,6 +2815,43 @@ function autoRelax(banner){
     banner.className='computing';
     banner.textContent='🔓 Loosening goals so today can still finish…';
   }
+}
+
+// The mirror of autoRelax: once the exact solver says the day is feasible under
+// the current relaxed goals, give back every rung that is no longer needed (a
+// food was removed, a mis-tap undone, or the earlier estimate over-relaxed).
+// Each relaxed goal is stepped down one rung at a time while a valid completion
+// still exists — one worker probe per rung tried. Keyed to the state+steps so it
+// runs once per state; the score is a high-water mark, so nothing is refunded.
+function autoUnrelax(){
+  const h=incFeasHash()+'|'+JSON.stringify(S.relaxSteps||{});
+  const overlayOpen=!document.getElementById('overlay').classList.contains('h');
+  if(_autoUnrelaxHash===h || overlayOpen || _relaxSearchTok!==null) return;
+  _autoUnrelaxHash=h;
+  const tok={}; _relaxSearchTok=tok;
+  const h0=incFeasHash();
+  (async()=>{
+    const cur={...(S.relaxSteps||{})};
+    let changed=false;
+    for(const gid of Object.keys(cur)){
+      while((cur[gid]||0)>0){
+        const trial={...cur,[gid]:cur[gid]-1};
+        const ok=await exactFeasWithGoals(goalsWithSteps(trial), null);
+        if(_relaxSearchTok!==tok) return;      // cancelled: a dialog took over
+        if(incFeasHash()!==h0){                // the plate changed under us: drop the stale answer
+          _relaxSearchTok=null; _autoUnrelaxHash=null; render(); return;
+        }
+        if(ok!==true) break;
+        cur[gid]=trial[gid]; if(!cur[gid]) delete cur[gid];
+        changed=true;
+      }
+    }
+    _relaxSearchTok=null;
+    if(!changed) return;
+    S.relaxSteps=cur;
+    startIncFeasCompute();
+    saveState(); render();
+  })();
 }
 
 // Bypasses addServing's _incComputing guard: the user explicitly confirmed this
@@ -3534,6 +3637,19 @@ function openCategoriesModal(){
   }
 
   showList();
+}
+
+// ── End Day ───────────────────────────────────
+// Manual day boundary: today is finalized into HIST now and the app moves on to
+// the next date's slate. Anything eaten afterwards counts toward that next day.
+function endDayNow(){
+  const cur=todayStr(), real=localDateStr(new Date());
+  const msg = cur>real
+    ? `Today was already ended early (you're on ${cur}'s slate). End this one too and move on to ${addDays(cur,1)}?`
+    : 'End today now? It gets scored into the week as it stands, and anything you eat next counts toward tomorrow.';
+  if(!confirm(msg)) return;
+  LS.set(lk('dayShift'), {from:real, to:addDays(cur,1)});
+  if(rolloverIfNeeded()) { saveState(); render(); }
 }
 
 // ── Reset Day ─────────────────────────────────

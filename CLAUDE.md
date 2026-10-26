@@ -103,8 +103,11 @@ A goal is never relaxed by a bespoke number. Every goal has a **fixed step**
   same size no matter how far the day is already relaxed. Passing an
   already-relaxed copy from `effGoals()` into `relaxStep`/`effRange` would
   double-count — don't.
-- `S.relaxScore` is the day's score: total steps taken, cumulative. **0 is a
-  perfect day.** "Restore goals" clears `relaxSteps` but not the score.
+- `S.relaxScore` is the day's score: the **high-water mark** of total steps
+  held at once (`applyRelaxSteps`). **0 is a perfect day.** Loosen → tighten →
+  loosen again never charges the same rung twice, but a rung once needed stays
+  on the books: `autoUnrelax()` and "Restore goals" give steps back without
+  refunding the score.
 - The score is read **per day**, not as a running total: `weekRelaxDays()` gives
   the window's days oldest→newest with each day's score, the week strip prints
   that number inside each day's pip, and `weekRelaxAvg()` — the one weekly figure
@@ -122,12 +125,40 @@ Two paths produce a relaxation, both returning `{goalId: totalSteps}`:
    then drops goals that weren't needed and steps survivors back a rung. One
    worker run per probe.
 
+**Relaxation is symmetric.** `autoUnrelax()` is the mirror of `autoRelax()`:
+when the exact solver reports the day *can* finish (`incFeas.count > 0`, even
+if truncated — a found plan proves feasibility) and any goal is relaxed, it
+steps each relaxed goal down one rung at a time with `exactFeasWithGoals`
+probes until a rung is actually needed, then applies the result. Keyed to
+`incFeasHash()` plus the steps so it runs once per state; it shares
+`_relaxSearchTok` with the other searches and bails out (and re-renders) if the
+plate changes mid-probe.
+
 **The day is never allowed to dead-end.** When the exact solver reports zero
 valid completions, `renderBanner` calls `autoRelax()`, which runs the joint
 search and *applies* the smallest fix automatically — no button, no warning.
 Only a genuinely unfixable state (even full relaxation can't finish the day)
 shows a message. `_autoRelaxHash` keys the attempt to `incFeasHash()` so it runs
 once per state; `cancelRelaxSearch()` resets it so a cancelled search retries.
+
+## Day boundary
+
+Dates are **local** calendar days (`localDateStr`; the old `toISOString` keys
+flipped the day mid-evening in US time zones). `S.dayDate` pins which
+`day_YYYY-MM-DD` key the in-memory state belongs to, and `saveDayState()`
+writes to *that* key, never to "today" — that was the bug where a PWA left
+open past midnight carried yesterday's food into the new day.
+`rolloverIfNeeded()` compares `S.dayDate` to `todayStr()` and swaps slates; it
+runs at the top of `render()`, on `visibilitychange`/`focus`/`pageshow`, and
+once a minute. `finalizeHistory()` deletes a day key once it's folded into
+`HIST`.
+
+**⏹ End day** (week strip) is the manual boundary: it writes
+`lk('dayShift') = {from: realDate, to: nextDate}` and `todayStr()` returns `to`
+while the real date is still `from`, so the finished day finalizes through the
+normal path and anything eaten afterwards lands on the next slate. The shift
+expires by itself when the calendar catches up. `loadDayState()` also carries a
+one-time migration that adopts a future-dated (UTC) key as today.
 
 ## Weekly window
 
