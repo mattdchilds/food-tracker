@@ -295,6 +295,11 @@ const DEF_GOALS = [
   {id:'cal',    name:'Calories',     unit:'cal', type:'range',     goal:1900, range:50,    default:0,   builtin:true},
   {id:'pro',    name:'Protein',      unit:'g',   type:'min',       threshold:80,            default:0,   builtin:true},
   {id:'health', name:'Health Score', unit:'',    type:'avg_min',   threshold:0.6,           default:0.5, builtin:true},
+  // Sugar Equivalent: a daily ceiling on weighted sweetener points, not grams.
+  // Each sweetener counts as the grams of sugar it stands in for times a
+  // badness weight (SUGAR_RUBRIC below), so the budget steers a sweet tooth
+  // toward the less harmful options. Health deliberately ignores sugar now.
+  {id:'sugar',  name:'Sugar Equivalent', unit:'pts', type:'max',   threshold:35,            default:0,   builtin:true},
   {id:'meals',  name:'Meals',        unit:'',    type:'count_min', threshold:2,             default:0,   builtin:true, targetCategory:'meals'},
   // weekly:true → threshold is a WEEKLY budget; today's effective cap is what
   // remains after the trailing qualifying days' spend (see baseThr). Ships
@@ -3681,6 +3686,17 @@ function aiMetricGoals(){
   return S.goals.filter(g=>g.enabled!==false&&g.id!=='cal'&&g.type!=='count_min'&&!isVarietyGoal(g));
 }
 
+// How a food's Sugar Equivalent is scored. Lives here because the assistant is
+// what scores new foods; the weights are the user's, agreed 2026-11-25.
+const SUGAR_RUBRIC=`The "sugar" metric is Sugar Equivalent points per serving, NOT grams of sugar. For each sweetener in the food take the grams of sugar it stands in for (for real sugars, the grams themselves; for high-intensity sweeteners and sugar alcohols, the grams of sugar giving the same sweetness) and multiply by its weight, then add them up:
+- 1.0: added sugar, cane sugar, corn syrup, HFCS, honey, maple syrup, molasses, agave, coconut sugar, juice concentrate, and the "added sugars" on an oat milk label (maltose)
+- 0.5: maltitol and similar sugar alcohols; dried fruit and fruit juice
+- 0.3: sucralose, aspartame, acesulfame-K
+- 0.15: erythritol, allulose, stevia, monk fruit
+- 0.1: sugar in whole fresh or frozen fruit
+- 0: lactose in plain dairy, starch, and the natural sugar in vegetables and tomato
+Use the label's "added sugars" line when there is one. Examples: 250 cal of regular ice cream = 21; a Quest-style protein bar = 4.5; an apple = 2; plain oatmeal, eggs, cheese = 0. Round to the nearest 0.5.`;
+
 function aiSystemPrompt(){
   const vOn=aiVarietyOn();
   const goalLines=S.goals.filter(g=>g.enabled!==false).map(g=>{
@@ -3709,8 +3725,10 @@ function aiSystemPrompt(){
 
   const hasHealth=S.goals.some(g=>g.id==='health'&&g.enabled!==false);
   const healthNote=hasHealth
-    ?'\nThe "health" metric is a 0–1 score per food: ~0.10–0.20 junk food (candy, ice cream), ~0.35–0.45 fast food, ~0.55 average home cooking, ~0.70–0.85 wholesome (oats, eggs, legumes), ~0.90+ fruits/vegetables.'
+    ?'\nThe "health" metric is a 0–1 score per food for everything the other goals do NOT measure — judge it as if calories, protein and sugar/sweeteners did not exist. Raise it for whole or minimally processed ingredients, fibre, vegetables, legumes, whole grains, unsaturated fats; lower it for ultra-processing, frying, refined flour, saturated fat, high sodium. Anchors: ~0.15 donut, ~0.25–0.35 chips, ice cream, pizza, ~0.40–0.50 fast food, white bread, ~0.55–0.65 decent home cooking, whole-grain bread, ~0.75–0.90 oats, eggs, beans, ~0.95 whole fruit/vegetables. A sweet food is not unhealthy merely for being sweet — the sugar goal already charges for that.'
     :'';
+  const hasSugar=S.goals.some(g=>g.id==='sugar'&&g.enabled!==false);
+  const sugarNote=hasSugar?'\n'+SUGAR_RUBRIC:'';
 
   return `You are the built-in assistant of a personal meal-planner web app. The user plans and tracks daily food against goals.
 
@@ -3725,7 +3743,7 @@ ${foodLines}
 Eaten today:
 ${eaten}
 Exercise burned today: ${S.exCals} cal
-${healthNote}
+${healthNote}${sugarNote}
 You can add new foods with the add_food tool. When the user mentions a food that is not in the library, estimate realistic per-serving values for every goal metric yourself — do not ask for values unless the food is truly ambiguous. You also have web search: use it when the user names a specific brand, restaurant, or menu item (e.g. a fast-food order) so you can use the chain's published nutrition numbers instead of guessing, or when they ask you to look something up. For generic foods, your own estimates are fine — do not search for those. Default to a temporary food (permanent=false, lasts today only) unless the user asks to save it to the library. After a tool call succeeds, confirm briefly with the values you used. Keep answers short and practical.
 
 ${vOn?`Variety tags ("vtags"): each food gets 1–3 lowercase family tags used to track weekly dietary variety — the specific identity family first (two pizza variants share "pizza"; they are zero variety apart), plus a broader nutritional family where meaningful (oatmeal ["oats","grains"]; black beans ["beans","legumes"]; a meal-replacement shake ["shake","protein-supp","grains"]). Reuse tags already in the library where they fit — variety scoring works by overlap. Always include vtags when adding a food. Use set_food_tags to tag existing foods; if the user asks to "tag my library", tag every UNTAGGED food in one set_food_tags call.

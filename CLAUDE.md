@@ -41,6 +41,13 @@ There is no build step, no package.json, no test suite. Edit the HTML, reload.
 | `count_min` | at least N foods from `targetCategory` |
 | `variety_min` / `variety_max` | weekly food-family diversity, judged from per-food `vtags` |
 
+**Health and Sugar Equivalent are a pair.** `sugar` is a built-in `max` goal
+(35 pts/day) scored in weighted points, not grams: each sweetener counts as the
+grams of sugar it stands in for times a badness weight (`SUGAR_RUBRIC`, which is
+also what the AI assistant is given). `health` is the catch-all for whatever no
+other goal measures — score it as if calories, protein and sugar didn't exist,
+so a dessert isn't marked down twice for being sweet.
+
 `enabled === false` means off — `effGoals()` drops those, which removes them
 from the workers, the DP fallback, the relax estimator, and `precompHash()` in
 one place. `undefined` means on (back-compat).
