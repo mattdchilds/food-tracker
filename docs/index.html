@@ -1226,7 +1226,17 @@ function computePPCRange(foods){
     const i=(vals.length-1)*p, lo=Math.floor(i), hi=Math.ceil(i);
     return vals[lo]+(vals[hi]-vals[lo])*(i-lo);
   };
-  return {min:pct(.10), max:pct(.90)};
+  // Daily ceilings (sugar) are coloured per calorie too. The low end is fixed
+  // at zero, since a food with none of it should always read green.
+  const caps={};
+  for(const g of S.goals){
+    if(g.type!=='max'||g.weekly||g.enabled===false) continue;
+    const dv=foods.filter(f=>f.cal>0).map(f=>getMetric(f,g)/f.cal).sort((a,b)=>a-b);
+    if(!dv.length) continue;
+    const i=(dv.length-1)*.90, lo=Math.floor(i), hi=Math.ceil(i);
+    caps[g.id]=dv[lo]+(dv[hi]-dv[lo])*(i-lo);
+  }
+  return {min:pct(.10), max:pct(.90), caps};
 }
 function proCalColor(f, ppcRange){
   const {min,max}=ppcRange;
@@ -2103,9 +2113,13 @@ function dofTier(deg){ return deg<=.06?1:deg<=.18?2:3; }
 function getDispGoals(){
   return S.goals.filter(g=>g.enabled!==false&&g.id!=='cal'&&g.type!=='count_min'&&!isVarietyGoal(g)).slice(0,3);
 }
-// Colour for one serving's bite out of a daily ceiling (sugar): green is
-// nearly free, red is a serving that takes about half the day's budget or more.
-function maxShareColor(v, g){
+// Colour for a daily-ceiling metric (sugar). Like protein, it is judged per
+// calorie against the rest of the library: green has none, red is as dense as
+// the worst tenth of foods. Without a range (Compare) it falls back to one
+// serving's share of the day's budget.
+function maxShareColor(f, v, g, ppcRange){
+  const cap=ppcRange&&ppcRange.caps&&ppcRange.caps[g.id];
+  if(cap>0&&f.cal>0) return healthColor(Math.max(0, 1 - (v/f.cal)/cap));
   const thr=g.threshold;
   if(!(thr>0)) return healthColor(0.5);
   return healthColor(Math.max(0, 1 - v/(thr*.75)));
@@ -2136,7 +2150,7 @@ function foodStatsHtml(f, {names=false, ppcRange=null}={}){
         // The sugar goal gets an icon instead of its unit, like ♥ for health,
         // so three stats still fit on a phone-width card.
         const txt=g.id==='sugar' ? `🍬${fmtVal(v,g)}` : `${fmtVal(v,g)}${unit}`;
-        html+=` &nbsp; <span style="color:${maxShareColor(v,g)};font-weight:700" title="${esc(g.name)}: ${fmtVal(v,g)} of ${fmtVal(g.threshold,g)} a day">${txt}</span>${names?` ${g.name.toLowerCase()}`:''}`;
+        html+=` &nbsp; <span style="color:${maxShareColor(f,v,g,ppcRange)};font-weight:700" title="${esc(g.name)}: ${fmtVal(v,g)} of ${fmtVal(g.threshold,g)} a day">${txt}</span>${names?` ${g.name.toLowerCase()}`:''}`;
       } else {
         html+=` &nbsp; <b>${fmtVal(v,g)}${unit}</b>${names?` ${g.name.toLowerCase()}`:''}`;
       }
