@@ -2101,7 +2101,14 @@ function relaxNeededFor(f){
 function dofTier(deg){ return deg<=.06?1:deg<=.18?2:3; }
 
 function getDispGoals(){
-  return S.goals.filter(g=>g.enabled!==false&&g.id!=='cal'&&g.type!=='count_min'&&!isVarietyGoal(g)).slice(0,2);
+  return S.goals.filter(g=>g.enabled!==false&&g.id!=='cal'&&g.type!=='count_min'&&!isVarietyGoal(g)).slice(0,3);
+}
+// Colour for one serving's bite out of a daily ceiling (sugar): green is
+// nearly free, red is a serving that takes about half the day's budget or more.
+function maxShareColor(v, g){
+  const thr=g.threshold;
+  if(!(thr>0)) return healthColor(0.5);
+  return healthColor(Math.max(0, 1 - v/(thr*.75)));
 }
 function getCategoryName(catId){
   return S.categories.find(c=>c.id===catId)?.name || catId;
@@ -2125,6 +2132,11 @@ function foodStatsHtml(f, {names=false, ppcRange=null}={}){
       if(ppcRange && g.id===proGoalId){
         const col=proCalColor(f,ppcRange);
         html+=` &nbsp; <span style="color:${col};font-weight:700">${fmtVal(v,g)}${unit}</span>${names?` ${g.name.toLowerCase()}`:''}`;
+      } else if(g.type==='max' && !g.weekly){
+        // The sugar goal gets an icon instead of its unit, like ♥ for health,
+        // so three stats still fit on a phone-width card.
+        const txt=g.id==='sugar' ? `🍬${fmtVal(v,g)}` : `${fmtVal(v,g)}${unit}`;
+        html+=` &nbsp; <span style="color:${maxShareColor(v,g)};font-weight:700" title="${esc(g.name)}: ${fmtVal(v,g)} of ${fmtVal(g.threshold,g)} a day">${txt}</span>${names?` ${g.name.toLowerCase()}`:''}`;
       } else {
         html+=` &nbsp; <b>${fmtVal(v,g)}${unit}</b>${names?` ${g.name.toLowerCase()}`:''}`;
       }
